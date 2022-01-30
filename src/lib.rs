@@ -169,9 +169,9 @@ pub struct Overrides {
     #[structopt(name = "cpus", short = "c", long = "cpus")]
     nr_cpus: Option<u32>,
 
-    /// Override number of CPUs
-    #[structopt(name = "hostdevs", long = "hostdev")]
-    hostdevs: Vec<String>,
+    /// Host devices from VF pools
+    #[structopt(name = "netdevs", long = "netdev")]
+    netdevs: Vec<String>,
 }
 
 #[derive(Debug, StructOpt, Clone)]
@@ -796,22 +796,33 @@ impl Main {
 
         if let Some(devices) = xml.get_mut_child("devices") {
             // Remove existing host devices
-            while let Some(_hostdev) = devices.take_child("hostdevs") {}
+            while let Some(_netdev) = devices.take_child("netdevs") {}
 
-            for hostdev in &overrides.hostdevs {
-                if hostdev.starts_with("pool:") {
-                    let dev = &hostdev[5..];
+            for netdev in &overrides.netdevs {
+                if netdev.starts_with("pool:") {
+                    let netdev = &netdev[5..];
+                    let mut model = "".to_owned();
+                    let mut network = "";
+
+                    for part in netdev.split(",") {
+                        if part.starts_with("model:") {
+                            let model_type = &part[6..];
+                            model = format!("<model type='{model_type}'/>");
+                        } else {
+                            network = part;
+                        }
+                    }
                     let new_elem = format!(
                         r#"
   <interface type='network'>
-    <source network='{}' />
+    {model}
+    <source network='{network}' />
   </interface>
     "#,
-                        dev
                     );
                     let elem = Element::parse(new_elem.as_bytes())?;
                     devices.children.push(XMLNode::Element(elem));
-                } else if let Some((host, guest)) = hostdev.split_once("/") {
+                } else if let Some((host, guest)) = netdev.split_once("/") {
                     lazy_static! {
                         static ref BUS_SLOT: Regex =
                             Regex::new(r"^([0-9a-f]+):([0-9a-f]+)[.]([0-9a-f]+)$").unwrap();
@@ -839,10 +850,10 @@ impl Main {
                         let elem = Element::parse(new_elem.as_bytes())?;
                         devices.children.push(XMLNode::Element(elem));
                     } else {
-                        return Err(Error::ParsePCISpec(hostdev.to_owned()));
+                        return Err(Error::ParsePCISpec(netdev.to_owned()));
                     }
                 } else {
-                    return Err(Error::ParsePCISpec(hostdev.to_owned()));
+                    return Err(Error::ParsePCISpec(netdev.to_owned()));
                 }
             }
         }
