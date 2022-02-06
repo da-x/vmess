@@ -144,6 +144,12 @@ pub struct Stop {
     name: String,
 }
 
+#[derive(Debug, StructOpt, Clone, Default)]
+pub struct ShutdownWait {
+    /// Full name of the domain
+    pub name: String,
+}
+
 #[derive(Debug, StructOpt, Clone)]
 pub struct Rename {
     /// Full name of the domain
@@ -240,6 +246,9 @@ pub enum CommandMode {
     /// Stop a running VM but don't remove its definition
     Stop(Stop),
 
+    /// Clean shutdown and wait for VM to be off
+    ShutdownWait(ShutdownWait),
+
     /// Rename a VM that stopped
     Rename(Rename),
 
@@ -285,6 +294,10 @@ struct Config {
 
     #[serde(rename = "tmp-path")]
     tmp_path: PathBuf,
+
+    #[serde(default)]
+    #[serde(rename = "multi-user")]
+    multi_user: bool,
 
     #[serde(default)]
     #[serde(rename = "ssh-config")]
@@ -499,6 +512,9 @@ impl Main {
             }
             CommandMode::Stop(params) => {
                 self.stop(params)?;
+            }
+            CommandMode::ShutdownWait(params) => {
+                self.shutdown_wait(params)?;
             }
             CommandMode::Rename(params) => {
                 self.rename(params)?;
@@ -1124,6 +1140,33 @@ impl Main {
         let existing = pool.get_by_name(&params.name)?;
         if let Some(vm) = &existing.vm {
             ibash_stdout!("virsh shutdown {vm.name}")?;
+        } else {
+            return Err(Error::NoVMDefined(params.name));
+        }
+
+        Ok(())
+    }
+
+    fn shutdown_wait(&mut self, params: ShutdownWait) -> Result<(), Error> {
+        let pool = self.get_pool()?;
+
+        let existing = pool.get_by_name(&params.name)?;
+        if let Some(vm) = &existing.vm {
+            ibash_stdout!("virsh shutdown {vm.name}")?;
+
+            while let Err(_) = ibash_stdout!(
+                "virsh list --state-shutoff --name | grep -E '^{vm.name}$'"
+            ) {
+                if let Err(_) = ibash_stdout!(
+                        "virsh list --name | grep -E '^{vmname}$'",
+                        vmname = vm.name
+                ) {
+                    // Volatile VMs disappear
+                    break;
+                }
+
+                std::thread::sleep(std::time::Duration::from_millis(1000));
+            }
         } else {
             return Err(Error::NoVMDefined(params.name));
         }
