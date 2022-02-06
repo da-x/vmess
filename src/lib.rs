@@ -159,7 +159,7 @@ pub struct Rename {
     pub new_name: String,
 }
 
-#[derive(Debug, StructOpt, Clone)]
+#[derive(Debug, StructOpt, Clone, Default)]
 pub struct Console {
     /// Full name of the domain
     name: String,
@@ -493,6 +493,13 @@ impl Main {
         Ok(Self { opt, config })
     }
 
+    fn get_vm_prefix(&self) -> String {
+        match self.config.multi_user {
+            true => format!("{}-", std::env::var("USER").expect("USER not defined")),
+            false => "".to_owned(),
+        }
+    }
+
     pub fn run(&mut self) -> Result<(), Error> {
         match self.opt.command.clone() {
             CommandMode::List(params) => {
@@ -551,23 +558,31 @@ impl Main {
         };
 
         let mut files_to_domains = HashMap::new();
+        let vmname_prefix = self.get_vm_prefix();
+
         for line in ibash_stdout!("virsh list --all --name")?.lines() {
             let line = line.trim();
             if line.is_empty() {
                 continue;
             }
+
             let vmname = line;
+            let short_vmname = if vmname.starts_with(&vmname_prefix) {
+                &vmname[vmname_prefix.len()..]
+            } else {
+                continue;
+            };
 
             for line in ibash_stdout!("virsh domblklist {vmname}")?.lines() {
                 if let Some(cap) = SOURCE_FILE.captures(&line) {
                     let s = cap.get(1).unwrap().as_str();
-                    files_to_domains.insert(PathBuf::from(s), vmname.to_owned());
+                    files_to_domains.insert(PathBuf::from(s), short_vmname.to_owned());
                 }
             }
 
             let mut vm = VM {
                 attrs: Default::default(),
-                name: vmname.to_owned(),
+                name: short_vmname.to_owned(),
             };
             for line in ibash_stdout!("virsh dominfo {vmname}")?.lines() {
                 if let Some(cap) = DOM_PROP.captures(&line) {
@@ -577,7 +592,7 @@ impl Main {
                 }
             }
 
-            pool.vms.insert(vmname.to_owned(), vm);
+            pool.vms.insert(short_vmname.to_owned(), vm);
         }
 
         let pool_path = &self.config.pool_path;
@@ -914,8 +929,11 @@ impl Main {
             uuid.children[0] = XMLNode::Text(format!("{}", uuid::Uuid::new_v4()));
         }
 
+        let vmname_prefix = self.get_vm_prefix();
         if let Some(name) = xml.get_mut_child("name") {
-            name.children[0] = XMLNode::Text(params.full.clone());
+            let vm = params.full.clone();
+            let prefixed_vm_name = format!("{}{}", vmname_prefix, vm);
+            name.children[0] = XMLNode::Text(prefixed_vm_name);
         }
 
         if let Some(devices) = xml.get_mut_child("devices") {
@@ -969,7 +987,7 @@ impl Main {
         info!("Result: {}", v.trim());
 
         if !volatile && !params.paused {
-            ibash_stdout!("virsh start {params.full}")?;
+            ibash_stdout!("virsh start {vmname_prefix}{params.full}")?;
         }
 
         dir.close()?;
@@ -983,7 +1001,8 @@ impl Main {
         let existing = pool.get_by_name(&params.full)?;
 
         if let Some(vm) = &existing.vm {
-            let contents = ibash_stdout!("virsh dumpxml {vm.name}")?;
+            let vmname_prefix = self.get_vm_prefix();
+            let contents = ibash_stdout!("virsh dumpxml {vmname_prefix}{vm.name}")?;
             let mut xml = Element::parse(contents.as_bytes())?;
             Self::modify_xml_using_overrides(&mut xml, &params.overrides)?;
 
@@ -1010,7 +1029,8 @@ impl Main {
     }
 
     fn undefine(&mut self, params: Undefine) -> Result<(), Error> {
-        ibash_stdout!("virsh undefine {params.full}")?;
+        let vmname_prefix = self.get_vm_prefix();
+        ibash_stdout!("virsh undefine {vmname_prefix}{params.full}")?;
 
         Ok(())
     }
@@ -1038,8 +1058,9 @@ impl Main {
             if params.force {
                 if let Some(vm) = &existing.vm {
                     info!("Removing VM (state {:?})", existing.snap.sub.get("State"));
-                    let r1 = ibash_stdout!("virsh destroy {vm.name}");
-                    let r2 = ibash_stdout!("virsh undefine {vm.name}");
+                    let vmname_prefix = self.get_vm_prefix();
+                    let r1 = ibash_stdout!("virsh destroy {vmname_prefix}{vm.name}");
+                    let r2 = ibash_stdout!("virsh undefine {vmname_prefix}{vm.name}");
 
                     if r1.is_err() && r2.is_err() {
                         r2?;
@@ -1125,8 +1146,9 @@ impl Main {
             return Err(Error::HasSubSnapshots(params.name.clone(), "start"));
         }
 
+        let vmname_prefix = self.get_vm_prefix();
         if let Some(vm) = &existing.vm {
-            ibash_stdout!("virsh start {vm.name}")?;
+            ibash_stdout!("virsh start {vmname_prefix}{vm.name}")?;
         } else {
             return Err(Error::NoVMDefined(params.name));
         }
@@ -1137,9 +1159,10 @@ impl Main {
     fn stop(&mut self, params: Stop) -> Result<(), Error> {
         let pool = self.get_pool()?;
 
+        let vmname_prefix = self.get_vm_prefix();
         let existing = pool.get_by_name(&params.name)?;
         if let Some(vm) = &existing.vm {
-            ibash_stdout!("virsh shutdown {vm.name}")?;
+            ibash_stdout!("virsh shutdown {vmname_prefix}{vm.name}")?;
         } else {
             return Err(Error::NoVMDefined(params.name));
         }
@@ -1152,13 +1175,15 @@ impl Main {
 
         let existing = pool.get_by_name(&params.name)?;
         if let Some(vm) = &existing.vm {
-            ibash_stdout!("virsh shutdown {vm.name}")?;
+            let vmname_prefix = self.get_vm_prefix();
+
+            ibash_stdout!("virsh shutdown {vmname_prefix}{vm.name}")?;
 
             while let Err(_) = ibash_stdout!(
-                "virsh list --state-shutoff --name | grep -E '^{vm.name}$'"
+                "virsh list --state-shutoff --name | grep -E '^{vmname_prefix}{vm.name}$'"
             ) {
                 if let Err(_) = ibash_stdout!(
-                        "virsh list --name | grep -E '^{vmname}$'",
+                        "virsh list --name | grep -E '^{vmname_prefix}{vmname}$'",
                         vmname = vm.name
                 ) {
                     // Volatile VMs disappear
@@ -1216,7 +1241,9 @@ impl Main {
         let existing = pool.get_by_name(&params.name)?;
         if let Some(vm) = &existing.vm {
             use std::process::Command;
-            let mut v = Command::new("virsh").arg("console").arg(&vm.name).spawn()?;
+            let vmname_prefix = self.get_vm_prefix();
+            let vm = format!("{vmname_prefix}{}", vm.name);
+            let mut v = Command::new("virsh").arg("console").arg(&vm).spawn()?;
             let _status = v.wait()?;
         } else {
             return Err(Error::NoVMDefined(params.name));
@@ -1243,12 +1270,13 @@ impl Main {
                 }
 
                 println!("{:?}", vm.attrs.get("State"));
+                let vmname_prefix = self.get_vm_prefix();
                 match vm.attrs.get("State").as_ref().map(|x| x.as_str()) {
                     Some("shut off") => {
-                        ibash_stdout!("virsh undefine {vm.name}")?;
+                        ibash_stdout!("virsh undefine {vmname_prefix}{vm.name}")?;
                     }
                     _ => {
-                        ibash_stdout!("virsh destroy {vm.name}")?;
+                        ibash_stdout!("virsh destroy {vmname_prefix}{vm.name}")?;
                     }
                 }
             }
@@ -1304,19 +1332,25 @@ impl Main {
 
         let mut config = String::new();
 
+        let vmname_prefix = self.get_vm_prefix();
         for line in ibash_stdout!("virsh list --name")?.lines() {
-            let line = line.trim();
-            if line.is_empty() {
+            let vmname = line.trim();
+            if vmname.is_empty() {
                 continue;
             }
+            let short_vmname = if vmname.starts_with(&vmname_prefix) {
+                &vmname[vmname_prefix.len()..]
+            } else {
+                continue;
+            };
 
             let address = ibash_stdout!(
-                r#"virsh domifaddr {line} | grep ipv4 \
+                r#"virsh domifaddr {vmname} | grep ipv4 \
                 | awk '{{print $4}}' | awk -F/ '{{print $1}}'"#
             )?;
             let address = address.trim().to_owned();
             if address.len() > 0 {
-                base.insert(line.to_owned(), address.trim().to_owned());
+                base.insert(short_vmname.to_owned(), address.trim().to_owned());
             }
         }
 
