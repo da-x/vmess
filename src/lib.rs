@@ -1082,8 +1082,9 @@ impl Main {
             &self.config.tmp_path
         }
         .join(&new_base_name);
-        let new_disp = new.display();
+        let _ = std::fs::remove_file(&new);
 
+        let new_disp = new.display();
         if params.temp {
             let _ = std::fs::remove_file(&new_adv);
             std::os::unix::fs::symlink(&new, &new_adv).map_err(|e| {
