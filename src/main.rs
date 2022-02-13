@@ -32,7 +32,7 @@ fn init_log() -> Result<(), Error> {
                 message
             ))
         })
-        .level(log::LevelFilter::Off)
+        .level(log::LevelFilter::Info)
         .level_for("ops", log::LevelFilter::Debug)
         .chain(std::io::stdout())
         .apply()?;
