@@ -817,6 +817,13 @@ impl Main {
                 memory.children[0] =
                     XMLNode::Text(format!("{}", given_memory as u64 * 0x100000u64));
             }
+            if let Some(memory) = xml.get_mut_child("currentMemory") {
+                memory
+                    .attributes
+                    .insert("unit".to_owned(), "KiB".to_owned());
+                memory.children[0] =
+                    XMLNode::Text(format!("{}", given_memory as u64 * 0x100000u64));
+            }
         }
 
         if let Some(nr_cpus) = overrides.nr_cpus {
