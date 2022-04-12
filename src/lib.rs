@@ -1420,7 +1420,7 @@ impl Main {
 
             let address = ibash_stdout!(
                 r#"virsh domifaddr {vmname} | grep ipv4 \
-                | awk '{{print $4}}' | awk -F/ '{{print $1}}'"#
+                | awk '{{print $4}}' | awk -F/ '{{print $1}}' | tail -n 1"#
             )?;
             let address = address.trim().to_owned();
             if address.len() > 0 {
