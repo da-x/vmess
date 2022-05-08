@@ -1,0 +1,40 @@
+use crate::query::filter::{Expr};
+
+grammar;
+
+pub top: Expr = {
+    expr+ => Expr::multiple(<>)
+};
+
+expr: Expr = {
+    <e1:expr> "or" <e2:subexpr> => Expr::Or(Box::new(e1), Box::new(e2)),
+    <e:subexpr> => e,
+};
+
+subexpr : Expr = {
+    <e1:subexpr> "and" <e2:subexpr2> => Expr::And(Box::new(e1), Box::new(e2)),
+    <e:subexpr2> => e,
+};
+
+subexpr2 : Expr = {
+    "not:" <e:subexpr3> => Expr::Not(Box::new(e)),
+    <e:subexpr3> => e,
+};
+
+subexpr3 : Expr = {
+    <e:lowexpr> => e,
+};
+
+lowexpr : Expr = {
+    "running" => Expr::Running,
+    string => Expr::Substring(<>),
+    "(" <e:top> ")" => e,
+}
+
+number: u64 = {
+    <s:r"[0-9]+"> => s.parse().unwrap()
+}
+
+string: String = {
+    <s:r#"name:[^ ]+"#> => s[5..].to_owned(),
+}

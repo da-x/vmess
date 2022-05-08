@@ -1,3 +1,6 @@
+#[macro_use]
+extern crate lalrpop_util;
+
 use std::borrow::Cow;
 use std::collections::{btree_map, BTreeMap, HashMap};
 use std::convert::TryFrom;
@@ -20,8 +23,14 @@ use users::get_current_uid;
 use xmltree::{Element, XMLNode};
 
 mod utils;
+
+#[allow(unused_parens)]
+mod query;
+
 use fstrings::*;
 use utils::*;
+
+use crate::query::MatchInfo;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -84,6 +93,9 @@ pub enum Error {
 
     #[error("No VM defined for {0}")]
     NoVMDefined(String),
+
+    #[error("Filter parse error: {0}")]
+    FilterParseError(String),
 
     #[error("Under {0}: {1}")]
     Context(String, Box<Error>),
@@ -237,7 +249,10 @@ pub struct UpdateSshParams {
 }
 
 #[derive(Debug, StructOpt, Clone)]
-pub struct List {}
+pub struct List {
+    #[structopt(name = "quiet")]
+    pub filter: Vec<String>,
+}
 
 #[derive(Debug, StructOpt, Clone)]
 pub enum CommandMode {
@@ -660,11 +675,12 @@ impl Main {
         Ok(pool)
     }
 
-    fn list(&mut self, _params: List) -> Result<(), Error> {
+    fn list(&mut self, params: List) -> Result<(), Error> {
         let pool = self.get_pool()?;
 
         use indexmap::IndexSet;
         use prettytable::{format, Cell, Row, Table};
+        let filter_expr = query::Expr::parse_cmd(&params.filter)?;
 
         let mut table = Table::new();
         table.set_format(*format::consts::FORMAT_NO_BORDER_LINE_SEPARATOR);
@@ -700,6 +716,7 @@ impl Main {
             image: &Image,
             snapshot: &Snapshot,
             path: String,
+            filter_expr: &query::Expr,
         ) {
             let abs_image = config.pool_path.join(&snapshot.rel_path);
             let tmp = if let Ok(link) = std::fs::read_link(abs_image) {
@@ -749,6 +766,7 @@ impl Main {
             } else {
                 ("", tmp, Cow::from(""))
             };
+
             let disk_size = format!("{:.2} GB", snapshot.size_mb as f32 / 1024.0);
 
             let mut row = Row::empty();
@@ -762,7 +780,15 @@ impl Main {
                 };
                 row.add_cell(Cell::new(s));
             }
-            table.add_row(row);
+
+            let mi = MatchInfo {
+                vm_running: vm_state == "running",
+                name: &path,
+            };
+
+            if filter_expr.match_info(&mi) {
+                table.add_row(row);
+            }
 
             for (key, snapshot) in snapshot.sub.iter() {
                 by_snapshot(
@@ -773,6 +799,7 @@ impl Main {
                     image,
                     &snapshot,
                     format!("{}.{}", path, key),
+                    filter_expr,
                 );
             }
         }
@@ -784,8 +811,9 @@ impl Main {
             pool: &Pool,
             image: &Image,
             path: String,
+            filter_expr: &query::Expr,
         ) {
-            by_snapshot(&columns, config, table, pool, &image, &image.root, path);
+            by_snapshot(&columns, config, table, pool, &image, &image.root, path, filter_expr);
         }
 
         for (key, image) in pool.images.iter() {
@@ -796,6 +824,7 @@ impl Main {
                 &pool,
                 &image,
                 key.clone(),
+                &filter_expr,
             );
         }
 

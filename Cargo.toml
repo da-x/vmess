@@ -24,3 +24,7 @@ thiserror = "1"
 users = "0.11"
 uuid = { version = "0.8", features = ["v4"] }
 xmltree = "0.10"
+lalrpop-util = "*"
+
+[build-dependencies]
+lalrpop = "*"
