@@ -21,6 +21,9 @@ use structopt::StructOpt;
 use thiserror::Error;
 use users::get_current_uid;
 use xmltree::{Element, XMLNode};
+use strum::IntoEnumIterator;
+use strum_macros::EnumIter;
+
 
 mod utils;
 
@@ -250,7 +253,13 @@ pub struct UpdateSshParams {
 
 #[derive(Debug, StructOpt, Clone)]
 pub struct List {
-    #[structopt(name = "quiet")]
+    #[structopt(short = "f", long = "fields")]
+    pub fields: Option<String>,
+
+    #[structopt(short = "n", long = "no-headers")]
+    pub no_headers: bool,
+
+    #[structopt(name = "filter")]
     pub filter: Vec<String>,
 }
 
@@ -685,7 +694,7 @@ impl Main {
         let mut table = Table::new();
         table.set_format(*format::consts::FORMAT_NO_BORDER_LINE_SEPARATOR);
 
-        #[derive(Serialize, Deserialize, Hash, Eq, PartialEq)]
+        #[derive(Serialize, Deserialize, Hash, Eq, PartialEq, Debug, EnumIter)]
         enum Column {
             Name,
             Volatile,
@@ -694,19 +703,38 @@ impl Main {
             DiskUsage,
         }
 
-        let mut columns = indexmap::IndexSet::new();
-        columns.insert(Column::Name);
-        columns.insert(Column::Volatile);
-        columns.insert(Column::State);
-        columns.insert(Column::MemUsage);
-        columns.insert(Column::DiskUsage);
+        let mut hm = HashMap::new();
+        for field in Column::iter() {
+            hm.insert(format!("{:?}", field), field);
+        }
 
-        table.set_titles(Row::new(
-            columns
-                .iter()
-                .map(|x| Cell::new(&ron::ser::to_string(x).expect("serialization")))
-                .collect(),
-        ));
+        let mut columns = indexmap::IndexSet::new();
+        match params.fields {
+            Some(s) => {
+                for s in s.split(",") {
+                    match hm.remove(s) {
+                        Some(x) => { columns.insert(x); },
+                        None => {}
+                    }
+                }
+            }
+            None => {
+                columns.insert(Column::Name);
+                columns.insert(Column::Volatile);
+                columns.insert(Column::State);
+                columns.insert(Column::MemUsage);
+                columns.insert(Column::DiskUsage);
+            }
+        }
+
+        if !params.no_headers {
+            table.set_titles(Row::new(
+                    columns
+                    .iter()
+                    .map(|x| Cell::new(&ron::ser::to_string(x).expect("serialization")))
+                    .collect(),
+            ));
+        }
 
         fn by_snapshot(
             columns: &IndexSet<Column>,
