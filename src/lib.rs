@@ -242,7 +242,8 @@ pub struct Modify {
 
 #[derive(Debug, StructOpt, Clone)]
 pub struct Undefine {
-    pub full: String,
+    /// List of the full names of the domains to kill
+    pub names: Vec<String>,
 }
 
 #[derive(Debug, StructOpt, Clone)]
@@ -1109,7 +1110,10 @@ impl Main {
 
     fn undefine(&mut self, params: Undefine) -> Result<(), Error> {
         let vmname_prefix = self.get_vm_prefix();
-        ibash_stdout!("virsh undefine {vmname_prefix}{params.full}")?;
+
+        for name in &params.names {
+            ibash_stdout!("virsh undefine {vmname_prefix}{name}")?;
+        }
 
         Ok(())
     }
