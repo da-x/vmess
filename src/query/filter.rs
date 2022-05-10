@@ -1,9 +1,15 @@
 use crate::Error;
 
+#[derive(Debug, Eq, PartialEq, Copy, Clone)]
+pub enum VMState {
+    Running,
+    Stopped,
+}
+
 #[derive(Debug)]
 pub enum Expr {
     Substring(String),
-    Running,
+    State(VMState),
     All,
     Not(Box<Expr>),
     And(Box<Expr>, Box<Expr>),
@@ -11,7 +17,7 @@ pub enum Expr {
 }
 
 pub struct MatchInfo<'a> {
-    pub vm_running: bool,
+    pub vm_state: Option<VMState>,
     pub name: &'a str,
 }
 
@@ -42,8 +48,8 @@ impl Expr {
             Expr::Substring(substr) => {
                 return info.name.contains(substr);
             },
-            Expr::Running => {
-                return info.vm_running;
+            Expr::State(state) => {
+                return info.vm_state == Some(*state);
             }
             Expr::All => true,
             Expr::Not(a) => !a.match_info(info),

@@ -1,4 +1,4 @@
-use crate::query::filter::{Expr};
+use crate::query::filter::{Expr, VMState};
 
 grammar;
 
@@ -26,7 +26,8 @@ subexpr3 : Expr = {
 };
 
 lowexpr : Expr = {
-    "running" => Expr::Running,
+    "running" => Expr::State(VMState::Running),
+    "stopped" => Expr::State(VMState::Stopped),
     string => Expr::Substring(<>),
     "(" <e:top> ")" => e,
 }

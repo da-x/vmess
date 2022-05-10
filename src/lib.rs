@@ -30,7 +30,7 @@ mod query;
 use fstrings::*;
 use utils::*;
 
-use crate::query::MatchInfo;
+use crate::query::{MatchInfo, VMState};
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -782,7 +782,11 @@ impl Main {
             }
 
             let mi = MatchInfo {
-                vm_running: vm_state == "running",
+                vm_state: match vm_state {
+                    "running" => Some(VMState::Running),
+                    "shut off" => Some(VMState::Stopped),
+                    _ => None,
+                },
                 name: &path,
             };
 
