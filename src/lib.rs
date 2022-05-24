@@ -161,13 +161,13 @@ pub struct Kill {
 #[derive(Debug, StructOpt, Clone)]
 pub struct Start {
     /// Full name of the domain
-    name: String,
+    pub name: String,
 }
 
 #[derive(Debug, StructOpt, Clone)]
 pub struct Stop {
     /// Full name of the domain
-    name: String,
+    pub name: String,
 }
 
 #[derive(Debug, StructOpt, Clone, Default)]
@@ -195,15 +195,15 @@ pub struct Console {
 pub struct Overrides {
     /// Override GB of memory
     #[structopt(name = "memory", short = "m", long = "mem")]
-    memory_gb: Option<u32>,
+    pub memory_gb: Option<u32>,
 
     /// Override number of CPUs
     #[structopt(name = "cpus", short = "c", long = "cpus")]
-    nr_cpus: Option<u32>,
+    pub nr_cpus: Option<u32>,
 
     /// Host devices from VF pools
     #[structopt(name = "netdevs", long = "netdev")]
-    netdevs: Vec<String>,
+    pub netdevs: Vec<String>,
 }
 
 #[derive(Debug, StructOpt, Clone)]
