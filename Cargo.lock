@@ -472,9 +472,9 @@ checksum = "1aab8fc367588b89dcee83ab0fd66b72b50b72fa1904d7095045ace2b0c81c35"
 
 [[package]]
 name = "lalrpop"
-version = "0.17.2"
+version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64dc3698e75d452867d9bd86f4a723f452ce9d01fe1d55990b79f0c790aa67db"
+checksum = "de5e019883a6e9734d093f34216a3857160c6bc2a9a1ec196a177aaa737c74af"
 dependencies = [
  "ascii-canvas",
  "atty",
@@ -483,7 +483,7 @@ dependencies = [
  "docopt",
  "ena",
  "itertools",
- "lalrpop-util 0.17.2",
+ "lalrpop-util",
  "petgraph",
  "regex",
  "regex-syntax",
@@ -492,20 +492,17 @@ dependencies = [
  "sha2",
  "string_cache",
  "term",
- "unicode-xid 0.1.0",
+ "unicode-xid",
 ]
-
-[[package]]
-name = "lalrpop-util"
-version = "0.17.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c277d18683b36349ab5cd030158b54856fca6bb2d5dc5263b06288f486958b7c"
 
 [[package]]
 name = "lalrpop-util"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d6e9bc1801eb54529fd6a020aaf9514e8193bb6b42d96d0fe7da99187efa93d"
+dependencies = [
+ "regex",
+]
 
 [[package]]
 name = "lazy_static"
@@ -705,7 +702,7 @@ version = "1.0.36"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c7342d5883fbccae1cc37a2353b09c87c9b0f3afd73f5fb9bba687a1f733b029"
 dependencies = [
- "unicode-xid 0.2.2",
+ "unicode-xid",
 ]
 
 [[package]]
@@ -1127,7 +1124,7 @@ checksum = "a684ac3dcd8913827e18cd09a68384ee66c1de24157e3c556c9ab16d85695fb7"
 dependencies = [
  "proc-macro2",
  "quote",
- "unicode-xid 0.2.2",
+ "unicode-xid",
 ]
 
 [[package]]
@@ -1219,12 +1216,6 @@ checksum = "3ed742d4ea2bd1176e236172c8429aaf54486e7ac098db29ffe6529e0ce50973"
 
 [[package]]
 name = "unicode-xid"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc72304796d0818e357ead4e000d19c9c174ab23dc11093ac919054d20a6a7fc"
-
-[[package]]
-name = "unicode-xid"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ccb82d61f80a663efe1f787a51b16b5a51e3314d6ac365b08639f52387b33f3"
@@ -1271,7 +1262,7 @@ dependencies = [
  "fstrings",
  "indexmap",
  "lalrpop",
- "lalrpop-util 0.18.1",
+ "lalrpop-util",
  "lazy_static",
  "log",
  "prettytable-rs",

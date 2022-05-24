@@ -24,9 +24,9 @@ thiserror = "1"
 users = "0.11"
 uuid = { version = "0.8", features = ["v4"] }
 xmltree = "0.10"
-lalrpop-util = "*"
+lalrpop-util = { version = "0.18", features = ["lexer"] }
 strum = "0.17.1"
 strum_macros = "0.17.1"
 
 [build-dependencies]
-lalrpop = "*"
+lalrpop = { version = "0.18", features = ["lexer"] }
