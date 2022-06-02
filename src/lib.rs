@@ -583,11 +583,6 @@ impl Main {
     }
 
     fn get_pool(&self) -> Result<Pool, Error> {
-        lazy_static! {
-            static ref SOURCE_FILE: Regex = Regex::new(r"^[\t ]+[^ ]+[\t ]+([^']+)$").unwrap();
-            static ref DOM_PROP: Regex = Regex::new(r"^([^:]+):[ \t]*([^ \t]+.*)$").unwrap();
-        }
-
         let mut pool = Pool {
             images: Default::default(),
             vms: Default::default(),
@@ -609,26 +604,13 @@ impl Main {
                 continue;
             };
 
-            for line in ibash_stdout!("virsh domblklist {vmname}")?.lines() {
-                if let Some(cap) = SOURCE_FILE.captures(&line) {
-                    let s = cap.get(1).unwrap().as_str();
-                    files_to_domains.insert(PathBuf::from(s), short_vmname.to_owned());
-                }
+            match Self::load_extra_domain_info(&mut files_to_domains, short_vmname, vmname, &mut pool) {
+                Ok(_) => {},
+                Err(_) => {
+                    // Assume VM went away during iteration
+                    pool.vms.remove(short_vmname);
+                },
             }
-
-            let mut vm = VM {
-                attrs: Default::default(),
-                name: short_vmname.to_owned(),
-            };
-            for line in ibash_stdout!("virsh dominfo {vmname}")?.lines() {
-                if let Some(cap) = DOM_PROP.captures(&line) {
-                    let key = cap.get(1).unwrap().as_str();
-                    let value = cap.get(2).unwrap().as_str();
-                    vm.attrs.insert(key.to_owned(), value.to_owned());
-                }
-            }
-
-            pool.vms.insert(short_vmname.to_owned(), vm);
         }
 
         let pool_path = &self.config.pool_path;
@@ -1550,6 +1532,38 @@ IdentityFile {}
         }
 
         Ok(UpdateSshDisposition::Updated)
+    }
+
+    fn load_extra_domain_info(
+        files_to_domains: &mut HashMap<PathBuf, String>,
+        short_vmname: &str,
+        vmname: &str,
+        pool: &mut Pool) -> Result<(), Error>
+    {
+        lazy_static! {
+            static ref SOURCE_FILE: Regex = Regex::new(r"^[\t ]+[^ ]+[\t ]+([^']+)$").unwrap();
+            static ref DOM_PROP: Regex = Regex::new(r"^([^:]+):[ \t]*([^ \t]+.*)$").unwrap();
+        }
+
+        for line in ibash_stdout!("virsh domblklist {vmname}")?.lines() {
+            if let Some(cap) = SOURCE_FILE.captures(&line) {
+                let s = cap.get(1).unwrap().as_str();
+                files_to_domains.insert(PathBuf::from(s), short_vmname.to_owned());
+            }
+        }
+        let mut vm = VM {
+            attrs: Default::default(),
+            name: short_vmname.to_owned(),
+        };
+        for line in ibash_stdout!("virsh dominfo {vmname}")?.lines() {
+            if let Some(cap) = DOM_PROP.captures(&line) {
+                let key = cap.get(1).unwrap().as_str();
+                let value = cap.get(2).unwrap().as_str();
+                vm.attrs.insert(key.to_owned(), value.to_owned());
+            }
+        }
+        pool.vms.insert(short_vmname.to_owned(), vm);
+        Ok(())
     }
 }
 
