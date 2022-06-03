@@ -1165,8 +1165,8 @@ impl VMess {
             &self.config.pool_path
         } else {
             &self.config.tmp_path
-        }
-        .join(&new_base_name);
+        }.join(&new_base_name);
+
         let _ = std::fs::remove_file(&new);
 
         let new_disp = new.display();
@@ -1180,7 +1180,10 @@ impl VMess {
             })?;
         }
 
-        let backing = self.config.pool_path.join(&parent.image_path());
+        let pool_path = &self.config.pool_path;
+        let pool_path_disp = pool_path.display();
+        let backing = pool_path.join(&parent.image_path());
+        let backing_basename = backing.file_name().unwrap().to_str().unwrap();
         let backing_disp = backing.display();
 
         info!(
@@ -1201,8 +1204,14 @@ impl VMess {
             }
         }
 
-        let v = ibash_stdout!("qemu-img create -f qcow2 {new_disp} -F qcow2 -b {backing_disp}")?;
-        info!("Result: {:?}", v);
+        let cmd = format!("qemu-img create -f qcow2 {new_disp} -F qcow2 -b {backing_disp}");
+        let v = ibash_stdout!("{}", cmd)?;
+        info!("qemu-image create result: {:?}", v);
+
+        // Make sure the backing store pathname is relative.
+        let cmd = format!("qemu-img rebase -F qcow2 -u {new_disp} -b {backing_basename}");
+        let v = ibash_stdout!("{}", cmd)?;
+        info!("qemu-image rebase result: {:?}", v);
 
         if let Some(template) = params.base_template {
             self.spawn(Spawn {
