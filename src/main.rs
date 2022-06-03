@@ -45,7 +45,7 @@ fn main_wrap() -> Result<(), Error> {
 
     init_log()?;
 
-    match Main::new(&opt) {
+    match Main::command(&opt) {
         Err(err) => return Err(err.into()),
         Ok(mut vmess) => {
             vmess.run()?;

@@ -318,7 +318,6 @@ pub struct CommandArgs {
     #[structopt(name = "config-file", short = "c")]
     config: Option<PathBuf>,
 
-    /// Non-interactive mode - print data and exit
     #[structopt(subcommand)]
     command: CommandMode,
 }
@@ -349,9 +348,9 @@ struct SSHConfig {
     config_file: PathBuf,
 }
 
-pub struct Main {
+pub struct VMess {
     config: Config,
-    opt: CommandArgs,
+    command: Option<CommandMode>,
 }
 
 #[derive(Debug)]
@@ -397,7 +396,7 @@ struct VM {
 }
 
 #[derive(Debug)]
-struct Pool {
+pub struct Pool {
     images: BTreeMap<String, Image>,
     vms: BTreeMap<String, VM>,
 }
@@ -486,10 +485,18 @@ impl Snapshot {
     }
 }
 
-impl Main {
-    pub fn new(opt: &CommandArgs) -> Result<Self, Error> {
+impl VMess {
+    pub fn command(opt: &CommandArgs) -> Result<Self, Error> {
         let opt = (*opt).clone();
-        let config_path = if let Some(config) = &opt.config {
+        Self::new(opt.config, Some(opt.command))
+    }
+
+    pub fn default() -> Result<Self, Error> {
+        Self::new(None, None)
+    }
+
+    fn new(config_path: Option<PathBuf>, command: Option<CommandMode>) -> Result<Self, Error> {
+        let config_path = if let Some(config) = &config_path {
             config.clone()
         } else {
             if let Ok(path) = std::env::var("VMESS_CONFIG_PATH") {
@@ -526,7 +533,10 @@ impl Main {
         )
         .unwrap();
 
-        Ok(Self { opt, config })
+        Ok(Self {
+            command,
+            config
+        })
     }
 
     fn get_vm_prefix(&self) -> String {
@@ -537,7 +547,12 @@ impl Main {
     }
 
     pub fn run(&mut self) -> Result<(), Error> {
-        match self.opt.command.clone() {
+        let command = match &self.command {
+            Some(command) => command.clone(),
+            None => return Ok(()),
+        };
+
+        match command {
             CommandMode::List(params) => {
                 self.list(params)?;
             }
@@ -582,7 +597,12 @@ impl Main {
         Ok(())
     }
 
-    fn get_pool(&self) -> Result<Pool, Error> {
+    pub fn image_full_basename(&self, full_name: impl AsRef<str>) -> PathBuf {
+        let basename = full_name.as_ref().to_owned().replace(".", "%");
+        self.config.pool_path.join(basename)
+    }
+
+    pub fn get_pool(&self) -> Result<Pool, Error> {
         let mut pool = Pool {
             images: Default::default(),
             vms: Default::default(),
@@ -1573,7 +1593,7 @@ pub fn command(command: CommandMode) -> Result<(), Error> {
         command,
     };
 
-    match Main::new(&opt) {
+    match VMess::command(&opt) {
         Err(err) => return Err(err),
         Ok(mut vmess) => {
             vmess.run()?;
