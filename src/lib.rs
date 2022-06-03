@@ -1181,7 +1181,6 @@ impl VMess {
         }
 
         let pool_path = &self.config.pool_path;
-        let pool_path_disp = pool_path.display();
         let backing = pool_path.join(&parent.image_path());
         let backing_basename = backing.file_name().unwrap().to_str().unwrap();
         let backing_disp = backing.display();
