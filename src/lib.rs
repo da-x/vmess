@@ -1324,8 +1324,14 @@ impl VMess {
                 return Err(Error::RenameAcrossParentsUnsupported);
             }
 
-            let parent = pool.get_by_name(&parent_name)?;
-            let new_base_name = parent.snap.join(name);
+            let new_base_name = {
+                if parent_name == "" {
+                    PathBuf::from(format!("{name}.qcow2"))
+                } else {
+                    let parent = pool.get_by_name(&parent_name)?;
+                    parent.snap.join(name)
+                }
+            };
             let existing = &existing.image_path();
 
             let tmp_image_path = self.config.tmp_path.join(existing);
