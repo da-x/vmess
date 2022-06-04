@@ -1318,10 +1318,44 @@ impl VMess {
 
             let parent = pool.get_by_name(&parent_name)?;
             let new_base_name = parent.snap.join(name);
-            let new_adv = self.config.pool_path.join(&new_base_name);
-            let image_path = self.config.pool_path.join(&existing.image_path());
+            let existing = &existing.image_path();
 
-            std::fs::rename(image_path, new_adv)?;
+            let tmp_image_path = self.config.tmp_path.join(existing);
+            if tmp_image_path.exists() {
+                let new_adv = self.config.tmp_path.join(&new_base_name);
+                let image_path = self.config.tmp_path.join(existing);
+                let new_link_path = self.config.pool_path.join(&new_base_name);
+                let old_link_path = self.config.pool_path.join(existing);
+                std::fs::rename(&image_path, &new_adv).map_err(|e| {
+                    Error::Context(
+                        format!("rename: {} -> {}",
+                            image_path.display(), new_adv.display()),
+                        Box::new(e.into()),
+                    )
+                })?;
+                std::fs::remove_file(&old_link_path).map_err(|e| {
+                    Error::Context(
+                        format!("remove {}", old_link_path.display()),
+                        Box::new(e.into()),
+                    )
+                })?;
+                std::os::unix::fs::symlink(&new_adv, &new_link_path).map_err(|e| {
+                    Error::Context(
+                        format!("symlink {} creation", new_adv.display()),
+                        Box::new(e.into()),
+                    )
+                })?;
+            } else {
+                let new_adv = self.config.pool_path.join(&new_base_name);
+                let image_path = self.config.pool_path.join(existing);
+                std::fs::rename(&image_path, &new_adv).map_err(|e| {
+                    Error::Context(
+                        format!("rename: {} -> {}",
+                            image_path.display(), new_adv.display()),
+                        Box::new(e.into()),
+                    )
+                })?;
+            }
         } else {
             return Err(Error::AlreadyExists);
         }
