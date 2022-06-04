@@ -602,6 +602,10 @@ impl VMess {
         self.config.pool_path.join(basename)
     }
 
+    pub fn get_pool_path(&self) -> &PathBuf {
+        &self.config.pool_path
+    }
+
     pub fn get_pool(&self) -> Result<Pool, Error> {
         let mut pool = Pool {
             images: Default::default(),
