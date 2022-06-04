@@ -1384,6 +1384,21 @@ impl VMess {
         Ok(())
     }
 
+    pub fn background_console(&self, fullname: &str) -> Result<Command, Error> {
+        let pool = self.get_pool()?;
+
+        let existing = pool.get_by_name(&fullname)?;
+        if let Some(vm) = &existing.vm {
+            let vmname_prefix = self.get_vm_prefix();
+            let vm = format!("{vmname_prefix}{}", vm.name);
+            let mut command = Command::new("virsh");
+            command.arg("console").arg(&vm);
+            return Ok(command);
+        } else {
+            return Err(Error::NoVMDefined(fullname.to_owned()));
+        }
+    }
+
     fn kill(&mut self, params: Kill) -> Result<(), Error> {
         let pool = self.get_pool()?;
 
