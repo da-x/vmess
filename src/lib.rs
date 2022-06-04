@@ -12,6 +12,7 @@ use std::io::Read;
 use std::io::{BufWriter, Write as OtherWrite};
 use std::os::unix::prelude::MetadataExt;
 use std::path::PathBuf;
+use std::process::Command;
 
 use lazy_static::lazy_static;
 use log::*;
@@ -323,29 +324,32 @@ pub struct CommandArgs {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-struct Config {
+pub struct Config {
     #[serde(rename = "pool-path")]
-    pool_path: PathBuf,
+    pub pool_path: PathBuf,
 
     #[serde(rename = "tmp-path")]
-    tmp_path: PathBuf,
+    pub tmp_path: PathBuf,
 
     #[serde(default)]
     #[serde(rename = "multi-user")]
-    multi_user: bool,
+    pub multi_user: bool,
 
     #[serde(default)]
     #[serde(rename = "ssh-config")]
-    ssh_config: Option<SSHConfig>,
+    pub ssh_config: Option<SSHConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
-struct SSHConfig {
+pub struct SSHConfig {
     #[serde(rename = "identity-file")]
-    identity_file: String,
+    pub identity_file: String,
+
+    #[serde(rename = "pubkey-file")]
+    pub pubkey_file: String,
 
     #[serde(rename = "config-file")]
-    config_file: PathBuf,
+    pub config_file: PathBuf,
 }
 
 pub struct VMess {
@@ -602,8 +606,8 @@ impl VMess {
         self.config.pool_path.join(basename)
     }
 
-    pub fn get_pool_path(&self) -> &PathBuf {
-        &self.config.pool_path
+    pub fn get_config(&self) -> &Config {
+        &self.config
     }
 
     pub fn get_pool(&self) -> Result<Pool, Error> {
@@ -1372,7 +1376,6 @@ impl VMess {
 
         let existing = pool.get_by_name(&params.name)?;
         if let Some(vm) = &existing.vm {
-            use std::process::Command;
             let vmname_prefix = self.get_vm_prefix();
             let vm = format!("{vmname_prefix}{}", vm.name);
             let mut v = Command::new("virsh").arg("console").arg(&vm).spawn()?;

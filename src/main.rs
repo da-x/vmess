@@ -1,6 +1,6 @@
 use structopt::StructOpt;
 use thiserror::Error;
-use vmess::{CommandArgs, Main};
+use vmess::{CommandArgs, VMess};
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -45,7 +45,7 @@ fn main_wrap() -> Result<(), Error> {
 
     init_log()?;
 
-    match Main::command(&opt) {
+    match VMess::command(&opt) {
         Err(err) => return Err(err.into()),
         Ok(mut vmess) => {
             vmess.run()?;
