@@ -1218,7 +1218,9 @@ impl VMess {
         // Make sure the backing store pathname is relative.
         let cmd = format!("qemu-img rebase -F qcow2 -u {new_disp} -b {backing_basename}");
         let v = ibash_stdout!("{}", cmd)?;
-        info!("qemu-image rebase result: {:?}", v);
+        if v != "" {
+            info!("qemu-image rebase result: {:?}", v);
+        }
 
         if let Some(template) = params.base_template {
             self.spawn(Spawn {
