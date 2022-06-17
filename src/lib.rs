@@ -1355,6 +1355,7 @@ impl VMess {
                         Box::new(e.into()),
                     )
                 })?;
+                let _ = std::fs::remove_file(&new_link_path);
                 std::os::unix::fs::symlink(&new_adv, &new_link_path).map_err(|e| {
                     Error::Context(
                         format!("symlink {} creation", new_adv.display()),
