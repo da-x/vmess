@@ -135,6 +135,13 @@ pub struct Fork {
     pub overrides: Overrides,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VMInfo {
+    // Override default username for VM access
+    #[serde(default)]
+    pub username: Option<String>,
+}
+
 #[derive(Debug, StructOpt, Clone, Default)]
 pub struct Exists {
     /// Full name of the domain
@@ -360,6 +367,7 @@ pub struct VMess {
 #[derive(Debug)]
 struct Snapshot {
     rel_path: PathBuf,
+    vm_info: VMInfo,
     size_mb: u64,
     vm_using: Option<String>,
     sub: BTreeMap<String, Snapshot>,
@@ -384,6 +392,14 @@ impl Snapshot {
                 .with_file_name(format!("{}%{}.qcow2", name, v.join("%")))
         } else {
             panic!();
+        }
+    }
+}
+
+impl VMInfo {
+    fn merge(&mut self, vm_info: &VMInfo) {
+        if let Some(username) = &vm_info.username {
+            self.username = Some(username.clone())
         }
     }
 }
@@ -484,6 +500,7 @@ impl Snapshot {
             sub: Default::default(),
             vm_using: files_to_domains.get(&abs_path).map(|x| (*x).to_owned()),
             size_mb: (std::fs::metadata(&abs_path)?.blocks() * 512) / (1024 * 1024),
+            vm_info: Default::default(),
             rel_path: path,
         })
     }
@@ -669,8 +686,15 @@ impl VMess {
                     btree_map::Entry::Occupied(o) => o.into_mut(),
                 };
 
+                let json_path = self.config.pool_path.join(PathBuf::from(format!("{}.json", name)));
+                if json_path.exists() {
+                    image.root.vm_info.merge(&read_json_path(json_path)?);
+                }
+
+                let mut vm_info = image.root.vm_info.clone();
                 let mut node = &mut image.root;
                 let mut r = vec![];
+
                 for sub in v.into_iter() {
                     r.push(sub.clone());
 
@@ -681,8 +705,16 @@ impl VMess {
                     };
                     let image = match node.sub.entry(sub.to_owned()) {
                         btree_map::Entry::Vacant(v) => {
-                            let path = PathBuf::from(format!("{}{}.qcow2", name, sub_path));
-                            v.insert(Snapshot::new(&pool_path, path, &files_to_domains)?)
+                            let path_base = PathBuf::from(format!("{}{}", name, sub_path));
+                            let path = PathBuf::from(format!("{}.qcow2", path_base.display()));
+                            let mut snapshot = Snapshot::new(&pool_path, path, &files_to_domains)?;
+                            let json_path =
+                                self.config.pool_path.join(PathBuf::from(format!("{}.json", path_base.display())));
+                            if json_path.exists() {
+                                vm_info.merge(&read_json_path(json_path)?);
+                            }
+                            snapshot.vm_info = vm_info.clone();
+                            v.insert(snapshot)
                         }
                         btree_map::Entry::Occupied(o) => o.into_mut(),
                     };
@@ -1519,27 +1551,44 @@ impl VMess {
         let pool = self.get_pool()?;
         ssh_config.config_file = adjust_path_by_env(ssh_config.config_file);
 
-        let mut base = BTreeMap::new();
+        #[derive(Default)]
+        struct HostEntry {
+            hostname: Option<String>,
+            user: Option<String>,
+        }
+
+        let mut host_config = BTreeMap::new();
+        let mut cur_host_str: Option<String> = None;
+        let mut cur_host: Option<&mut HostEntry> = None;
 
         if ssh_config.config_file.exists() {
             lazy_static! {
                 static ref HOST: Regex = Regex::new("^Host (.*)$").unwrap();
                 static ref HOSTNAME: Regex = Regex::new("^Hostname (.*)$").unwrap();
+                static ref USER: Regex = Regex::new("^User (.*)$").unwrap();
             }
 
-            let mut host: Option<String> = None;
             let file = std::fs::File::open(&ssh_config.config_file)?;
             for line in BufReader::new(file).lines() {
                 let line = line?;
+
                 if let Some(cap) = HOSTNAME.captures(&line) {
-                    let hostname = Some(cap.get(1).unwrap().as_str().to_owned());
-                    if let (Some(host), Some(hostname)) = (&host, &hostname) {
-                        if pool.get_by_name(host).is_ok() {
-                            base.insert(host.clone(), hostname.clone());
+                    let hostname = cap.get(1).unwrap().as_str().to_owned();
+                    if let Some(cur_host_str) = &cur_host_str {
+                        if pool.get_by_name(cur_host_str).is_ok() {
+                            if let Some(cur_host) = &mut cur_host {
+                                cur_host.hostname = Some(hostname);
+                            }
                         }
                     }
                 } else if let Some(cap) = HOST.captures(&line) {
-                    host = Some(cap.get(1).unwrap().as_str().to_owned());
+                    drop(cur_host);
+                    let host = cap.get(1).unwrap().as_str().to_owned();
+                    cur_host_str = Some(host.clone());
+                    cur_host = Some(match host_config.entry(host) {
+                        btree_map::Entry::Vacant(v) => v.insert(Default::default()),
+                        btree_map::Entry::Occupied(o) => o.into_mut(),
+                    });
                 }
             }
         }
@@ -1562,23 +1611,37 @@ impl VMess {
                 r#"virsh domifaddr {vmname} | grep ipv4 \
                 | awk '{{print $4}}' | awk -F/ '{{print $1}}' | tail -n 1"#
             )?;
+
             let address = address.trim().to_owned();
             if address.len() > 0 {
-                base.insert(short_vmname.to_owned(), address.trim().to_owned());
+                let username = if let Ok(snapshot) = pool.get_by_name(short_vmname) {
+                    if let Some(username) = &snapshot.snap.vm_info.username {
+                        Some(username.as_str())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }.unwrap_or("user");
+
+                host_config.insert(short_vmname.to_owned(), HostEntry {
+                    hostname: Some(address.trim().to_owned()),
+                    user: Some(username.to_owned()),
+                });
             }
         }
 
-        for (host, address) in base.iter() {
+        for (host, entry) in host_config.iter() {
+            writeln!(&mut config, r#"Host {}"#, host)?;
+            if let Some(user) = &entry.user {
+                writeln!(&mut config, r#"User {}"#, user)?;
+            }
+            if let Some(hostname) = &entry.hostname {
+                writeln!(&mut config, r#"Hostname {}"#, hostname)?;
+            }
             writeln!(
                 &mut config,
-                r#"Host {}
-User user
-Hostname {}
-IdentityFile {}
-
-"#,
-                host,
-                address.trim(),
+                "IdentityFile {}\n\n",
                 ssh_config.identity_file
             )?;
         }
@@ -1620,7 +1683,7 @@ IdentityFile {}
             info!(
                 "updated {} with {} hosts",
                 ssh_config.config_file.display(),
-                base.len()
+                host_config.len()
             );
         }
 
@@ -1658,6 +1721,15 @@ IdentityFile {}
         pool.vms.insert(short_vmname.to_owned(), vm);
         Ok(())
     }
+}
+
+fn read_json_path<T>(json_path: PathBuf) -> Result<T, Error>
+    where T: for<'a> Deserialize<'a>
+{
+    let mut file = std::fs::File::open(&json_path)?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    Ok(serde_json::de::from_str(&contents)?)
 }
 
 pub fn command(command: CommandMode) -> Result<(), Error> {
