@@ -1520,8 +1520,8 @@ impl VMess {
 
                 info!("Remove image files for {}", name_path);
 
-                let image_path = self.config.pool_path.join(&image_path);
-                std::fs::remove_file(&image_path)?;
+                let pool_image_path = self.config.pool_path.join(&image_path);
+                std::fs::remove_file(&pool_image_path)?;
                 let tmp_image_path = self.config.tmp_path.join(&image_path);
                 if tmp_image_path.exists() {
                     std::fs::remove_file(&tmp_image_path)?;
