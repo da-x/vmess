@@ -212,6 +212,10 @@ pub struct Overrides {
     /// Host devices from VF pools
     #[structopt(name = "netdevs", long = "netdev")]
     pub netdevs: Vec<String>,
+
+    /// Increase main image size to this amount
+    #[structopt(long)]
+    pub image_size: Option<byte_unit::Byte>,
 }
 
 #[derive(Debug, StructOpt, Clone)]
@@ -1207,6 +1211,8 @@ impl VMess {
             &self.config.tmp_path
         }.join(&new_base_name);
 
+        let new_name_in_pool = &self.config.pool_path.join(&new_base_name);
+        let new_name_in_pool_disp = new_name_in_pool.display();
         let _ = std::fs::remove_file(&new);
 
         let new_disp = new.display();
@@ -1252,6 +1258,18 @@ impl VMess {
         let v = ibash_stdout!("{}", cmd)?;
         if v != "" {
             info!("qemu-image rebase result: {:?}", v);
+        }
+
+        // Resize the image if requested
+        if let Some(image_size) = params.overrides.image_size {
+            let image_size = format!("{}", image_size).replace(" ", "");
+            let cmd = format!("qemu-img resize {new_name_in_pool_disp} {image_size}");
+            println!("{}", cmd);
+
+            let v = ibash_stdout!("{}", cmd)?;
+            if v != "" {
+                info!("qemu-image rebase result: {:?}", v);
+            }
         }
 
         if let Some(template) = params.base_template {

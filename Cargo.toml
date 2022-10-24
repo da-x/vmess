@@ -27,6 +27,7 @@ xmltree = "0.10"
 lalrpop-util = { version = "0.18", features = ["lexer"] }
 strum = "0.17.1"
 strum_macros = "0.17.1"
+byte-unit = "4"
 
 [build-dependencies]
 lalrpop = { version = "0.18", features = ["lexer"] }
