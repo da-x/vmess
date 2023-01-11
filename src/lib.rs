@@ -135,6 +135,20 @@ pub struct Fork {
     pub overrides: Overrides,
 }
 
+#[derive(Debug, StructOpt, Clone, Default)]
+pub struct New {
+    /// Full name of the domain
+    pub name: String,
+
+    /// Store image in the temp pool, implies 'volatile'
+    #[structopt(name = "temp", short = "t")]
+    pub temp: bool,
+
+    /// Main image size
+    #[structopt(long)]
+    pub size: byte_unit::Byte,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VMInfo {
     // Override default username for VM access
@@ -278,6 +292,8 @@ pub struct List {
 
 #[derive(Debug, StructOpt, Clone)]
 pub enum CommandMode {
+    New(New),
+
     /// Fork a new VM out of a suspended VM image and optionally spawn it
     /// if a template definition is provided
     Fork(Fork),
@@ -583,6 +599,9 @@ impl VMess {
             }
             CommandMode::Fork(params) => {
                 self.fork(params)?;
+            }
+            CommandMode::New(params) => {
+                self.new_image(params)?;
             }
             CommandMode::Exists(params) => {
                 self.exists(params)?;
@@ -1280,6 +1299,45 @@ impl VMess {
                 volatile: params.volatile,
                 paused: params.paused,
                 overrides: params.overrides.clone(),
+            })?;
+        }
+
+        Ok(())
+    }
+
+    fn new_image(&self, params: New)  -> Result<(), Error> {
+        let pool = self.get_pool()?;
+        let name = &params.name;
+
+        let new_base_name = {
+            PathBuf::from(format!("{name}.qcow2"))
+        };
+
+        if let Ok(_) = pool.get_by_name(&name) {
+            return Err(Error::AlreadyExists);
+        }
+
+        let new = if !params.temp {
+            &self.config.pool_path
+        } else {
+            &self.config.tmp_path
+        }.join(&new_base_name);
+
+        let _ = std::fs::remove_file(&new);
+        let new_disp = new.display();
+
+        let image_size = format!("{}", params.size).replace(" ", "");
+        let cmd = format!("qemu-img create -f qcow2 {new_disp} {image_size}");
+        let v = ibash_stdout!("{}", cmd)?;
+        info!("qemu-image create result: {:?}", v);
+
+        if params.temp {
+            let new_link_path = self.config.pool_path.join(&new_base_name);
+            std::os::unix::fs::symlink(&new, &new_link_path).map_err(|e| {
+                Error::Context(
+                    format!("symlink {} creation", new_link_path.display()),
+                    Box::new(e.into()),
+                )
             })?;
         }
 
