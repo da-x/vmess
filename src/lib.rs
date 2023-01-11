@@ -227,6 +227,13 @@ pub struct Overrides {
     #[structopt(name = "netdevs", long = "netdev")]
     pub netdevs: Vec<String>,
 
+    /// Host devices from VF pools
+    #[structopt(long)]
+    pub cdrom: Option<PathBuf>,
+
+    #[structopt(long)]
+    pub destroy_on_reboot: bool,
+
     /// Increase main image size to this amount
     #[structopt(long)]
     pub image_size: Option<byte_unit::Byte>,
@@ -970,9 +977,44 @@ impl VMess {
             }
         }
 
+        if let Some(_) = &overrides.cdrom {
+            if let Some(os) = xml.get_mut_child("os") {
+                if let Some(boot) = os.get_mut_child("boot") {
+                    boot.attributes.insert("dev".to_owned(), "cdrom".to_owned());
+                }
+            }
+        }
+
+        if overrides.destroy_on_reboot {
+            let _ = xml.take_child("on_reboot");
+
+            let new_elem = format!(
+                r#"<on_reboot>destroy</on_reboot>"#,
+            );
+            let elem = Element::parse(new_elem.as_bytes())?;
+            xml.children.push(XMLNode::Element(elem));
+        }
+
         if let Some(devices) = xml.get_mut_child("devices") {
             // Remove existing host devices
             while let Some(_netdev) = devices.take_child("netdevs") {}
+
+            if let Some(cdrom) = &overrides.cdrom {
+                let cdrom = cdrom.display();
+                let new_elem = format!(
+                    r#"
+    <disk type="file" device="cdrom">
+      <driver name="qemu" type="raw"/>
+      <source file="{cdrom}"/>
+      <target dev="sda" bus="sata"/>
+      <readonly/>
+      <address type="drive" controller="0" bus="0" target="0" unit="0"/>
+    </disk>
+    "#,
+                );
+                let elem = Element::parse(new_elem.as_bytes())?;
+                devices.children.push(XMLNode::Element(elem));
+            }
 
             for netdev in &overrides.netdevs {
                 if netdev.starts_with("pool:") {
