@@ -103,6 +103,9 @@ pub enum Error {
 
     #[error("Under {0}: {1}")]
     Context(String, Box<Error>),
+
+    #[error("Invalid pool name: {0}")]
+    InvalidPoolName(String),
 }
 
 #[derive(Debug, StructOpt, Clone, Default)]
@@ -118,6 +121,10 @@ pub struct Fork {
     /// Store image in the temp pool, implies 'volatile'
     #[structopt(name = "temp", short = "t")]
     pub temp: bool,
+
+    /// Store image in the given pool
+    #[structopt(long = "pool")]
+    pub pool: Option<String>,
 
     /// Base template used for actual VM execution
     #[structopt(name = "base-template", short = "b")]
@@ -370,9 +377,23 @@ pub struct Config {
     pub multi_user: bool,
 
     #[serde(default)]
+    #[serde(rename = "pool")]
+    pub extra_pool_paths: Vec<NamedPoolPath>,
+
+    #[serde(default)]
     #[serde(rename = "ssh-config")]
     pub ssh_config: Option<SSHConfig>,
 }
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct NamedPoolPath {
+    #[serde(rename = "name")]
+    pub name: String,
+
+    #[serde(rename = "path")]
+    pub path: PathBuf,
+}
+
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct SSHConfig {
@@ -580,6 +601,19 @@ impl VMess {
                 .replace("$USER", &std::env::var("USER").expect("USER not defined")),
         )
         .unwrap();
+
+        let mut extra_pool_paths = vec![];
+        for extra_pool_path in config.extra_pool_paths {
+            let path = PathBuf::try_from(extra_pool_path.path
+                .into_os_string()
+                .into_string()
+                .unwrap()
+                .replace("$USER", &std::env::var("USER").expect("USER not defined"))).unwrap();
+            extra_pool_paths.push(NamedPoolPath {
+                path, name: extra_pool_path.name
+            })
+        }
+        config.extra_pool_paths = extra_pool_paths;
 
         Ok(Self {
             command,
@@ -1262,14 +1296,20 @@ impl VMess {
             }
         }
 
-        if params.temp {
-            std::fs::create_dir_all(&self.config.tmp_path)?;
-        }
-
-        let new = if !params.temp {
-            &self.config.pool_path
-        } else {
-            &self.config.tmp_path
+        let new = 'x: {
+            if let Some(pool_name) = &params.pool {
+                for pool in &self.config.extra_pool_paths {
+                    if &pool.name == pool_name {
+                        break 'x &pool.path;
+                    }
+                }
+                return Err(Error::InvalidPoolName(pool_name.clone()));
+            } else if !params.temp {
+                &self.config.pool_path
+            } else {
+                std::fs::create_dir_all(&self.config.tmp_path)?;
+                &self.config.tmp_path
+            }
         }.join(&new_base_name);
 
         let new_name_in_pool = &self.config.pool_path.join(&new_base_name);
@@ -1277,7 +1317,7 @@ impl VMess {
         let _ = std::fs::remove_file(&new);
 
         let new_disp = new.display();
-        if params.temp {
+        if params.temp || params.pool.is_some() {
             let _ = std::fs::remove_file(&new_adv);
             std::os::unix::fs::symlink(&new, &new_adv).map_err(|e| {
                 Error::Context(
@@ -1643,6 +1683,13 @@ impl VMess {
                 let tmp_image_path = self.config.tmp_path.join(&image_path);
                 if tmp_image_path.exists() {
                     std::fs::remove_file(&tmp_image_path)?;
+                }
+
+                for pool in &self.config.extra_pool_paths {
+                    let extra_pool_path = pool.path.join(&image_path);
+                    if extra_pool_path.exists() {
+                        std::fs::remove_file(extra_pool_path)?;
+                    }
                 }
 
                 Ok(())
