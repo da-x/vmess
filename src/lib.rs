@@ -239,6 +239,9 @@ pub struct Overrides {
     pub cdrom: Option<PathBuf>,
 
     #[structopt(long)]
+    pub usb: Option<PathBuf>,
+
+    #[structopt(long)]
     pub destroy_on_reboot: bool,
 
     /// Increase main image size to this amount
@@ -1019,6 +1022,14 @@ impl VMess {
             }
         }
 
+        if let Some(_) = &overrides.usb {
+            if let Some(os) = xml.get_mut_child("os") {
+                if let Some(_boot) = os.take_child("boot") {
+                    // So we use the boot order.
+                }
+            }
+        }
+
         if overrides.destroy_on_reboot {
             let _ = xml.take_child("on_reboot");
 
@@ -1043,6 +1054,23 @@ impl VMess {
       <target dev="sda" bus="sata"/>
       <readonly/>
       <address type="drive" controller="0" bus="0" target="0" unit="0"/>
+    </disk>
+    "#,
+                );
+                let elem = Element::parse(new_elem.as_bytes())?;
+                devices.children.push(XMLNode::Element(elem));
+            }
+
+            if let Some(usb) = &overrides.usb {
+                let usb = usb.display();
+                let new_elem = format!(
+                    r#"
+    <disk type="file" device="disk">
+      <driver name="qemu" type="raw"/>
+      <source file="{usb}"/>
+      <target dev="sda" bus="usb"/>
+      <address type='usb' bus='0' port='4'/>
+      <boot order='1'/>
     </disk>
     "#,
                 );
