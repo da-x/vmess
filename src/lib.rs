@@ -763,7 +763,7 @@ impl VMess {
                 let mut r = vec![];
 
                 for sub in v.into_iter() {
-                    r.push(sub.clone());
+                    r.push(sub);
 
                     let sub_path = if r.len() == 0 {
                         "".to_string()
