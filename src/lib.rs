@@ -970,7 +970,7 @@ impl VMess {
             );
         }
 
-        table.print_tty(false);
+        table.print_tty(false)?;
 
         Ok(())
     }
