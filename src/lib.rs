@@ -262,6 +262,12 @@ pub struct Overrides {
     pub usb: Option<PathBuf>,
 
     #[structopt(long)]
+    pub uefi: bool,
+
+    #[structopt(long)]
+    pub secure_boot: bool,
+
+    #[structopt(long)]
     pub destroy_on_reboot: bool,
 
     /// Increase main image size to this amount
@@ -1037,7 +1043,7 @@ impl VMess {
         Ok(Element::parse(contents.as_bytes())?)
     }
 
-    fn modify_xml_using_overrides(xml: &mut Element, overrides: &Overrides) -> Result<(), Error> {
+    fn modify_xml_using_overrides(xml: &mut Element, overrides: &Overrides, fullname: &str) -> Result<(), Error> {
         if let Some(given_memory) = overrides.memory_gb {
             if let Some(memory) = xml.get_mut_child("memory") {
                 memory
@@ -1074,6 +1080,56 @@ impl VMess {
                 if let Some(_boot) = os.take_child("boot") {
                     // So we use the boot order.
                 }
+            }
+        }
+
+        if overrides.uefi {
+            if let Some(os) = xml.get_mut_child("os") {
+                let code = if overrides.secure_boot { ".secboot" } else {".cc" };
+                let vars = if overrides.secure_boot { ".secboot." } else {"." };
+                let attr = if overrides.secure_boot { " secure='yes' " } else { " " };
+                let sb = if overrides.secure_boot { "yes" } else { "no" };
+                let autoselection = is_version_at_least(&ibash_stdout!("virsh --version")?, &[8, 6]);
+                let new_elem = if autoselection {
+                    format!(r#"
+    <os>
+        <firmware>
+          <feature enabled="{sb}" name="enrolled-keys"/>
+          <feature enabled="{sb}" name="secure-boot"/>
+        </firmware>
+        <bootmenu enable='yes'/>
+    </os>
+    "#)
+                } else {
+                    format!(r#"
+    <os>
+        <firmware>
+          <feature enabled='yes' name='enrolled-keys'/>
+          <feature enabled='yes' name='secure-boot'/>
+        </firmware>
+        <loader readonly='yes' {attr} type='pflash'>/usr/share/edk2/ovmf/OVMF_CODE{code}.fd</loader>
+        <nvram template='/usr/share/edk2/ovmf/OVMF_VARS{vars}fd'>/var/lib/libvirt/qemu/nvram/{fullname}_VARS.fd</nvram>
+        <bootmenu enable='yes'/>
+    </os>
+    "#)
+                };
+                let elem = Element::parse(new_elem.as_bytes())?;
+                for child in elem.children.into_iter() {
+                    os.children.push(child);
+                }
+
+                if autoselection {
+                    os.attributes.insert("firmware".to_owned(), "efi".to_owned());
+                }
+            }
+            if let Some(features) = xml.get_mut_child("features") {
+                let new_elem = format!(
+                    r#"
+                    <smm state='on'/>
+    "#,
+                );
+                let elem = Element::parse(new_elem.as_bytes())?;
+                features.children.push(XMLNode::Element(elem));
             }
         }
 
@@ -1253,7 +1309,9 @@ impl VMess {
             }
         }
 
-        Self::modify_xml_using_overrides(&mut xml, &params.overrides)?;
+        let full_name = format!("{vmname_prefix}{}", params.full);
+
+        Self::modify_xml_using_overrides(&mut xml, &params.overrides, full_name.as_str())?;
 
         info!("Writing VM definition");
 
@@ -1288,7 +1346,7 @@ impl VMess {
         info!("Result: {}", v.trim());
 
         if !volatile && !params.paused {
-            ibash_stdout!("virsh start {vmname_prefix}{params.full}")?;
+            ibash_stdout!("virsh start {full_name}")?;
         }
 
         dir.close()?;
@@ -1305,7 +1363,9 @@ impl VMess {
             let vmname_prefix = self.get_vm_prefix();
             let contents = ibash_stdout!("virsh dumpxml {vmname_prefix}{vm.name}")?;
             let mut xml = Element::parse(contents.as_bytes())?;
-            Self::modify_xml_using_overrides(&mut xml, &params.overrides)?;
+            let full_name = format!("{vmname_prefix}{}", params.full);
+
+            Self::modify_xml_using_overrides(&mut xml, &params.overrides, full_name.as_str())?;
 
             let dir = tempdir::TempDir::new("vmess")?;
             let file_path = dir.path().join("domain.xml");
@@ -1333,7 +1393,7 @@ impl VMess {
         let vmname_prefix = self.get_vm_prefix();
 
         for name in &params.names {
-            ibash_stdout!("virsh undefine {vmname_prefix}{name}")?;
+            ibash_stdout!("virsh undefine --nvram {vmname_prefix}{name}")?;
         }
 
         Ok(())
@@ -1364,7 +1424,7 @@ impl VMess {
                     info!("Removing VM (state {:?})", existing.snap.sub.get("State"));
                     let vmname_prefix = self.get_vm_prefix();
                     let r1 = ibash_stdout!("virsh destroy {vmname_prefix}{vm.name}");
-                    let r2 = ibash_stdout!("virsh undefine {vmname_prefix}{vm.name}");
+                    let r2 = ibash_stdout!("virsh undefine --nvram {vmname_prefix}{vm.name}");
 
                     if r1.is_err() && r2.is_err() {
                         r2?;
@@ -1752,7 +1812,7 @@ impl VMess {
                     let vmname_prefix = self.get_vm_prefix();
                     match vm.attrs.get("State").as_ref().map(|x| x.as_str()) {
                         Some("shut off") => {
-                            ibash_stdout!("virsh undefine {vmname_prefix}{vm.name}")?;
+                            ibash_stdout!("virsh undefine --nvram {vmname_prefix}{vm.name}")?;
                         }
                         _ => {
                             ibash_stdout!("virsh destroy {vmname_prefix}{vm.name}")?;
