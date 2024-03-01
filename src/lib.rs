@@ -1082,12 +1082,16 @@ impl VMess {
                 if netdev.starts_with("pool:") {
                     let netdev = &netdev[5..];
                     let mut model = "".to_owned();
+                    let mut mac_address = "".to_owned();
                     let mut network = "";
 
                     for part in netdev.split(",") {
                         if part.starts_with("model:") {
                             let model_type = &part[6..];
                             model = format!("<model type='{model_type}'/>");
+                        } else if part.starts_with("mac:") {
+                            let part_mac_address = &part[4..];
+                            mac_address = format!("<mac address='{part_mac_address}'/>");
                         } else {
                             network = part;
                         }
@@ -1096,6 +1100,7 @@ impl VMess {
                         r#"
   <interface type='network'>
     {model}
+    {mac_address}
     <source network='{network}' />
   </interface>
     "#,
