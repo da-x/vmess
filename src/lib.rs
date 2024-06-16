@@ -1170,7 +1170,8 @@ impl VMess {
             }
         }
 
-        let hash: u64 = calculate_hash(&params.full);
+        let vmname_prefix = self.get_vm_prefix();
+        let hash: u64 = calculate_hash(&format!("{}-{}", vmname_prefix, &params.full));
         let new_mac = format!(
             "52:52:{:02x}:{:02x}:{:02x}:{:02x}",
             (hash >> 32) & 0xff,
@@ -1183,7 +1184,6 @@ impl VMess {
             uuid.children[0] = XMLNode::Text(format!("{}", uuid::Uuid::new_v4()));
         }
 
-        let vmname_prefix = self.get_vm_prefix();
         if let Some(name) = xml.get_mut_child("name") {
             let vm = params.full.clone();
             let prefixed_vm_name = format!("{}{}", vmname_prefix, vm);
