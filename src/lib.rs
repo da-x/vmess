@@ -11,7 +11,7 @@ use std::io::BufReader;
 use std::io::Read;
 use std::io::{BufWriter, Write as OtherWrite};
 use std::os::unix::prelude::MetadataExt;
-use std::path::PathBuf;
+use std::path::{PathBuf};
 use std::process::Command;
 
 use lazy_static::lazy_static;
@@ -1465,6 +1465,13 @@ impl VMess {
         pool.get_by_name(&params.name).map(|_| ())
     }
 
+    fn get_path(&mut self, params: Exists) -> Result<PathBuf, Error> {
+        let pool = self.get_pool()?;
+        let item = pool.get_by_name(&params.name)?;
+        let path = self.config.pool_path.join(&item.image_path());
+        return Ok(path);
+    }
+
     fn start(&mut self, params: Start) -> Result<(), Error> {
         let pool = self.get_pool()?;
 
@@ -1928,6 +1935,17 @@ fn read_json_path<T>(json_path: PathBuf) -> Result<T, Error>
     let mut contents = String::new();
     file.read_to_string(&mut contents)?;
     Ok(serde_json::de::from_str(&contents)?)
+}
+
+pub fn get_vm_image_path(image: impl AsRef<str>) -> Result<PathBuf, Error> {
+    let vm = CommandMode::Exists(Exists { name: image.as_ref().to_owned() });
+    let opt = CommandArgs {
+        config: None,
+        command: vm,
+    };
+
+    let mut vmess = VMess::command(&opt)?;
+    return Ok(vmess.get_path(Exists { name: image.as_ref().to_owned() })?);
 }
 
 pub fn command(command: CommandMode) -> Result<(), Error> {
