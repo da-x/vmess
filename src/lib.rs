@@ -11,7 +11,7 @@ use std::io::BufReader;
 use std::io::Read;
 use std::io::{BufWriter, Write as OtherWrite};
 use std::os::unix::prelude::MetadataExt;
-use std::path::{PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use lazy_static::lazy_static;
@@ -104,8 +104,28 @@ pub enum Error {
     #[error("Under {0}: {1}")]
     Context(String, Box<Error>),
 
+    #[error("{0}")]
+    FreeText(String),
+
     #[error("Invalid pool name: {0}")]
     InvalidPoolName(String),
+}
+
+pub trait AddContext<T> {
+    fn with_context(self, f: impl FnOnce() -> String) -> Result<T, Error>;
+}
+
+impl<T, E> AddContext<T> for Result<T, E>
+    where E: Into<Error>
+{
+    fn with_context(self, f: impl FnOnce() -> String) -> Result<T, Error> {
+        match self {
+            Ok(v) => Ok(v),
+            Err(_) => {
+                self.map_err(|e| Error::Context(f(), Box::new(e.into())))
+            }
+        }
+    }
 }
 
 #[derive(Debug, StructOpt, Clone, Default)]
@@ -540,12 +560,26 @@ impl Pool {
 }
 
 impl Snapshot {
+    fn get_filename(
+        root_path: &PathBuf,
+        path: &PathBuf,
+    ) -> PathBuf {
+        return root_path.join(path);
+    }
+
+    fn exists(
+        root_path: &PathBuf,
+        path: &PathBuf,
+    ) -> bool {
+        return Self::get_filename(root_path, &path).exists();
+    }
+
     fn new(
         root_path: &PathBuf,
         path: PathBuf,
         files_to_domains: &HashMap<PathBuf, String>,
     ) -> Result<Self, Error> {
-        let abs_path = root_path.join(&path);
+        let abs_path = Self::get_filename(root_path, &path);
 
         Ok(Snapshot {
             sub: Default::default(),
@@ -703,7 +737,7 @@ impl VMess {
         let mut files_to_domains = HashMap::new();
         let vmname_prefix = self.get_vm_prefix();
 
-        for line in ibash_stdout!("virsh list --all --name")?.lines() {
+        for line in ibash_stdout!("virsh list --all --name").with_context(|| format!("during virsh list"))?.lines() {
             let line = line.trim();
             if line.is_empty() {
                 continue;
@@ -724,10 +758,9 @@ impl VMess {
                 },
             }
         }
-
         let pool_path = &self.config.pool_path;
-        for entry in std::fs::read_dir(&self.config.pool_path)? {
-            let entry = entry?;
+        for entry in std::fs::read_dir(&self.config.pool_path).with_context(|| format!("during read dir"))? {
+            let entry = entry.with_context(|| format!("during entry resolve"))?;
             let name = entry.file_name();
             let name = name.to_string_lossy();
             let path = entry.path();
@@ -743,11 +776,16 @@ impl VMess {
                     vec![]
                 };
 
+                let path = PathBuf::from(format!("{}.qcow2", name));
+                if !Snapshot::exists(&pool_path, &path) {
+                    continue;
+                }
+
                 let image = match pool.images.entry(name.to_owned()) {
                     btree_map::Entry::Vacant(v) => {
-                        let path = PathBuf::from(format!("{}.qcow2", name));
                         v.insert(Image {
-                            root: Snapshot::new(&pool_path, path, &files_to_domains)?,
+                            root: Snapshot::new(&pool_path, path.clone(), &files_to_domains)
+                                .with_context(|| format!("during snapshot resolve of path {}", path.display()))?,
                         })
                     }
                     btree_map::Entry::Occupied(o) => o.into_mut(),
@@ -755,7 +793,8 @@ impl VMess {
 
                 let json_path = self.config.pool_path.join(PathBuf::from(format!("{}.json", name)));
                 if json_path.exists() {
-                    image.root.vm_info.merge(&read_json_path(json_path)?);
+                    image.root.vm_info.merge(&read_json_path(&json_path)
+                        .with_context(|| format!("during merging of json {}", json_path.display()))?);
                 }
 
                 let mut vm_info = image.root.vm_info.clone();
@@ -770,15 +809,22 @@ impl VMess {
                     } else {
                         format!("%{}", r.join("%"))
                     };
+
+                    let path_base = PathBuf::from(format!("{}{}", name, sub_path));
+                    let path = PathBuf::from(format!("{}.qcow2", path_base.display()));
+                    if !Snapshot::exists(&pool_path, &path) {
+                        continue;
+                    }
+
                     let image = match node.sub.entry(sub.to_owned()) {
                         btree_map::Entry::Vacant(v) => {
-                            let path_base = PathBuf::from(format!("{}{}", name, sub_path));
-                            let path = PathBuf::from(format!("{}.qcow2", path_base.display()));
-                            let mut snapshot = Snapshot::new(&pool_path, path, &files_to_domains)?;
+                            let mut snapshot = Snapshot::new(&pool_path, path.clone(), &files_to_domains)
+                                .with_context(|| format!("during snapshot resolve of path {}", path.display()))?;
                             let json_path =
                                 self.config.pool_path.join(PathBuf::from(format!("{}.json", path_base.display())));
                             if json_path.exists() {
-                                vm_info.merge(&read_json_path(json_path)?);
+                                vm_info.merge(&read_json_path(&json_path)
+                                    .with_context(|| format!("during reading of json for sub {}", json_path.display()))?);
                             }
                             snapshot.vm_info = vm_info.clone();
                             v.insert(snapshot)
@@ -795,11 +841,12 @@ impl VMess {
     }
 
     fn list(&mut self, params: List) -> Result<(), Error> {
-        let pool = self.get_pool()?;
+        let pool = self.get_pool().with_context(|| format!("during get_pool"))?;
 
         use indexmap::IndexSet;
         use prettytable::{format, Cell, Row, Table};
-        let filter_expr = query::Expr::parse_cmd(&params.filter)?;
+        let filter_expr = query::Expr::parse_cmd(&params.filter)
+            .with_context(|| format!("during parse cmd"))?;
 
         let mut table = Table::new();
         table.set_format(*format::consts::FORMAT_NO_BORDER_LINE_SEPARATOR);
@@ -1352,12 +1399,9 @@ impl VMess {
         let new_disp = new.display();
         if params.temp || params.pool.is_some() {
             let _ = std::fs::remove_file(&new_adv);
-            std::os::unix::fs::symlink(&new, &new_adv).map_err(|e| {
-                Error::Context(
-                    format!("symlink {} creation", new_adv.display()),
-                    Box::new(e.into()),
-                )
-            })?;
+            std::os::unix::fs::symlink(&new, &new_adv).with_context(
+                || format!("symlink {} creation", new_adv.display())
+            )?;
         }
 
         let pool_path = &self.config.pool_path;
@@ -1928,10 +1972,10 @@ impl VMess {
     }
 }
 
-fn read_json_path<T>(json_path: PathBuf) -> Result<T, Error>
+fn read_json_path<T>(json_path: impl AsRef<Path>) -> Result<T, Error>
     where T: for<'a> Deserialize<'a>
 {
-    let mut file = std::fs::File::open(&json_path)?;
+    let mut file = std::fs::File::open(json_path.as_ref())?;
     let mut contents = String::new();
     file.read_to_string(&mut contents)?;
     Ok(serde_json::de::from_str(&contents)?)
