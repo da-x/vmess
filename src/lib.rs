@@ -50,8 +50,8 @@ pub enum Error {
     #[error("Config error: {0}")]
     ConfigError(#[from] config::ConfigError),
 
-    #[error("Config error: {0}")]
-    BoxError(#[from] Box<dyn std::error::Error + Send>),
+    #[error("{0}: {1}")]
+    Context(String, Box<dyn std::error::Error + Send + Sync + 'static>),
 
     #[error("Serde error: {0}")]
     Serderror(#[from] serde_json::Error),
@@ -100,9 +100,6 @@ pub enum Error {
 
     #[error("Filter parse error: {0}")]
     FilterParseError(String),
-
-    #[error("Under {0}: {1}")]
-    Context(String, Box<Error>),
 
     #[error("{0}")]
     FreeText(String),
@@ -1555,7 +1552,7 @@ impl VMess {
             std::os::unix::fs::symlink(&new, &new_link_path).map_err(|e| {
                 Error::Context(
                     format!("symlink {} creation", new_link_path.display()),
-                    Box::new(e.into()),
+                    Box::new(e),
                 )
             })?;
         }
@@ -1680,20 +1677,20 @@ impl VMess {
                     Error::Context(
                         format!("rename: {} -> {}",
                             image_path.display(), new_adv.display()),
-                        Box::new(e.into()),
+                            Box::new(e),
                     )
                 })?;
                 std::fs::remove_file(&old_link_path).map_err(|e| {
                     Error::Context(
                         format!("remove {}", old_link_path.display()),
-                        Box::new(e.into()),
+                        Box::new(e),
                     )
                 })?;
                 let _ = std::fs::remove_file(&new_link_path);
                 std::os::unix::fs::symlink(&new_adv, &new_link_path).map_err(|e| {
                     Error::Context(
                         format!("symlink {} creation", new_adv.display()),
-                        Box::new(e.into()),
+                        Box::new(e),
                     )
                 })?;
             } else {
@@ -1703,7 +1700,7 @@ impl VMess {
                     Error::Context(
                         format!("rename: {} -> {}",
                             image_path.display(), new_adv.display()),
-                        Box::new(e.into()),
+                        Box::new(e),
                     )
                 })?;
             }
