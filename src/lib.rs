@@ -74,7 +74,7 @@ pub enum Error {
     #[error("No default config file")]
     ConfigFile,
 
-    #[error("Not found: {0}")]
+    #[error("Image not found: {0}")]
     NotFound(String),
 
     #[error("Already exists")]
@@ -732,6 +732,14 @@ impl VMess {
     }
 
     pub fn get_pool(&self) -> Result<Pool, Error> {
+        self.get_pool_detailed(true)
+    }
+
+    pub fn get_pool_no_vms(&self) -> Result<Pool, Error> {
+        self.get_pool_detailed(false)
+    }
+
+    pub fn get_pool_detailed(&self, with_vm_list: bool) -> Result<Pool, Error> {
         let mut pool = Pool {
             images: Default::default(),
             vms: Default::default(),
@@ -740,27 +748,30 @@ impl VMess {
         let mut files_to_domains = HashMap::new();
         let vmname_prefix = self.get_vm_prefix();
 
-        for line in ibash_stdout!("virsh list --all --name").with_context(|| format!("during virsh list"))?.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
+        if with_vm_list {
+            for line in ibash_stdout!("virsh list --all --name").with_context(|| format!("during virsh list"))?.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
 
-            let vmname = line;
-            let short_vmname = if vmname.starts_with(&vmname_prefix) {
-                &vmname[vmname_prefix.len()..]
-            } else {
-                continue;
-            };
+                let vmname = line;
+                let short_vmname = if vmname.starts_with(&vmname_prefix) {
+                    &vmname[vmname_prefix.len()..]
+                } else {
+                    continue;
+                };
 
-            match Self::load_extra_domain_info(&mut files_to_domains, short_vmname, vmname, &mut pool) {
-                Ok(_) => {},
-                Err(_) => {
-                    // Assume VM went away during iteration
-                    pool.vms.remove(short_vmname);
-                },
+                match Self::load_extra_domain_info(&mut files_to_domains, short_vmname, vmname, &mut pool) {
+                    Ok(_) => {},
+                    Err(_) => {
+                        // Assume VM went away during iteration
+                        pool.vms.remove(short_vmname);
+                    },
+                }
             }
         }
+
         let pool_path = &self.config.pool_path;
         for entry in std::fs::read_dir(&self.config.pool_path).with_context(|| format!("during read dir"))? {
             let entry = entry.with_context(|| format!("during entry resolve"))?;
@@ -1561,16 +1572,9 @@ impl VMess {
     }
 
     fn exists(&mut self, params: Exists) -> Result<(), Error> {
-        let pool = self.get_pool()?;
+        let pool = self.get_pool_no_vms()?;
 
         pool.get_by_name(&params.name).map(|_| ())
-    }
-
-    fn get_path(&mut self, params: Exists) -> Result<PathBuf, Error> {
-        let pool = self.get_pool()?;
-        let item = pool.get_by_name(&params.name)?;
-        let path = self.config.pool_path.join(&item.image_path());
-        return Ok(path);
     }
 
     fn start(&mut self, params: Start) -> Result<(), Error> {
@@ -2045,8 +2049,9 @@ pub fn get_vm_image_path(image: impl AsRef<str>) -> Result<PathBuf, Error> {
         command: vm,
     };
 
-    let mut vmess = VMess::command(&opt)?;
-    return Ok(vmess.get_path(Exists { name: image.as_ref().to_owned() })?);
+    let vmess = VMess::command(&opt)?;
+    let pool_path = &vmess.config.pool_path;
+    return Ok(pool_path.join(format!("{}.qcow2", image.as_ref().replace(".", "%"))));
 }
 
 pub fn command(command: CommandMode) -> Result<(), Error> {
