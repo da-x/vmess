@@ -572,7 +572,7 @@ impl Snapshot {
         files_to_domains: &HashMap<PathBuf, String>,
     ) -> Result<Self, Error> {
         let abs_path = Self::get_filename(root_path, &path);
-        
+
         // Check if this is a frozen snapshot based on filename
         let filename = path.file_stem().unwrap_or_default().to_string_lossy();
         let is_frozen = is_frozen_snapshot(&filename);
@@ -844,16 +844,16 @@ impl VMess {
                 .unwrap()
                 .to_string_lossy()
                 .into_owned();
-            
+
             // Strip frozen suffix if present
             let clean_root_name = strip_frozen_suffix(&root_name);
-            
-            let base_name = if let Some(cap) = PARSE_QCOW2.captures(&format!("{}.qcow2", clean_root_name))
-            {
-                cap.get(1).unwrap().as_str().to_owned()
-            } else {
-                clean_root_name
-            };
+
+            let base_name =
+                if let Some(cap) = PARSE_QCOW2.captures(&format!("{}.qcow2", clean_root_name)) {
+                    cap.get(1).unwrap().as_str().to_owned()
+                } else {
+                    clean_root_name
+                };
 
             // Ensure we have an image entry for the base
             let image = match pool.images.entry(base_name.clone()) {
@@ -892,11 +892,11 @@ impl VMess {
                     // Generate a snapshot name based on the difference from parent
                     let current_name_raw = current_file.file_stem().unwrap().to_string_lossy();
                     let parent_name_raw = parent_file.file_stem().unwrap().to_string_lossy();
-                    
+
                     // Strip frozen suffixes for name generation
                     let current_name = strip_frozen_suffix(&current_name_raw);
                     let parent_name = strip_frozen_suffix(&parent_name_raw);
-                    
+
                     let snapshot_name = current_name
                         .replace(&parent_name, "")
                         .trim_start_matches('%')
