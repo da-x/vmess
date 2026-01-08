@@ -478,10 +478,6 @@ impl VMInfo {
     }
 }
 
-#[derive(Debug)]
-struct Image {
-    root: Snapshot,
-}
 
 #[derive(Debug)]
 struct VM {
@@ -491,7 +487,7 @@ struct VM {
 
 #[derive(Debug)]
 pub struct Pool {
-    images: BTreeMap<String, Image>,
+    images: BTreeMap<String, Snapshot>,
     vms: BTreeMap<String, VM>,
 }
 
@@ -511,7 +507,7 @@ impl Pool {
         fn by_snapshot<'a>(
             pool: &'a Pool,
             lookup: &str,
-            image: &Image,
+            image: &Snapshot,
             snapshot: &'a Snapshot,
             level: usize,
             name_path: String,
@@ -546,10 +542,10 @@ impl Pool {
         fn by_image<'a>(
             lookup: &str,
             pool: &'a Pool,
-            image: &'a Image,
+            image: &'a Snapshot,
             name_path: String,
         ) -> Option<GetInfo<'a>> {
-            by_snapshot(pool, lookup, &image, &image.root, 0, name_path.clone())
+            by_snapshot(pool, lookup, &image, &image, 0, name_path.clone())
         }
 
         for (key, image) in self.images.iter() {
@@ -864,8 +860,7 @@ impl VMess {
 
             // Ensure we have an image entry for the base
             let image = match pool.images.entry(base_name.clone()) {
-                btree_map::Entry::Vacant(v) => v.insert(Image {
-                    root: Snapshot::new(
+                btree_map::Entry::Vacant(v) => v.insert(Snapshot::new(
                         &pool_path,
                         root_rel_path.clone(),
                         &files_to_domains,
@@ -873,8 +868,7 @@ impl VMess {
                     )
                     .with_context(|| {
                         format!("during snapshot resolve of path {}", root_path.display())
-                    })?,
-                }),
+                    })?),
                 btree_map::Entry::Occupied(o) => o.into_mut(),
             };
 
@@ -884,7 +878,7 @@ impl VMess {
                 .pool_path
                 .join(PathBuf::from(format!("{}.json", base_name)));
             if json_path.exists() {
-                image.root.vm_info.merge(
+                image.vm_info.merge(
                     &read_json_path(&json_path).with_context(|| {
                         format!("during merging of json {}", json_path.display())
                     })?,
@@ -893,8 +887,8 @@ impl VMess {
 
             // Build the hierarchy from root to current file
             if chain_info.chain.len() > 1 {
-                let mut current_vm_info = image.root.vm_info.clone();
-                let mut current_node = &mut image.root;
+                let mut current_vm_info = image.vm_info.clone();
+                let mut current_node = image;
 
                 // Process chain from root to current file (reverse order)
                 for i in (0..chain_info.chain.len() - 1).rev() {
@@ -1037,7 +1031,7 @@ impl VMess {
             config: &Config,
             table: &mut Table,
             pool: &Pool,
-            image: &Image,
+            image: &Snapshot,
             snapshot: &Snapshot,
             path: String,
             filter_expr: &query::Expr,
@@ -1137,7 +1131,7 @@ impl VMess {
             config: &Config,
             table: &mut Table,
             pool: &Pool,
-            image: &Image,
+            image: &Snapshot,
             path: String,
             filter_expr: &query::Expr,
         ) {
@@ -1147,7 +1141,7 @@ impl VMess {
                 table,
                 pool,
                 &image,
-                &image.root,
+                &image,
                 path,
                 filter_expr,
             );
@@ -1917,8 +1911,8 @@ impl VMess {
         };
 
         struct Closure<'a> {
-            by_snapshot: &'a dyn Fn(&Closure, &Image, &Snapshot, String) -> Result<(), Error>,
-            by_name: &'a dyn Fn(&Closure, &Image, String) -> Result<(), Error>,
+            by_snapshot: &'a dyn Fn(&Closure, &Snapshot, &Snapshot, String) -> Result<(), Error>,
+            by_name: &'a dyn Fn(&Closure, &Snapshot, String) -> Result<(), Error>,
         }
 
         let recursive = Closure {
@@ -1987,7 +1981,7 @@ impl VMess {
                 Ok(())
             },
             by_name: &|closure, image, path| {
-                (closure.by_snapshot)(closure, &image, &image.root, path)
+                (closure.by_snapshot)(closure, &image, &image, path)
             },
         };
 
