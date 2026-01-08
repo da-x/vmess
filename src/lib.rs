@@ -443,6 +443,7 @@ struct Snapshot {
     vm_using: Option<String>,
     sub: BTreeMap<String, Snapshot>,
     frozen: bool,
+    locations: Vec<PathBuf>,
 }
 
 lazy_static! {
@@ -570,12 +571,20 @@ impl Snapshot {
         root_path: &PathBuf,
         path: PathBuf,
         files_to_domains: &HashMap<PathBuf, String>,
+        file_locations: &std::collections::HashMap<PathBuf, Vec<PathBuf>>,
     ) -> Result<Self, Error> {
         let abs_path = Self::get_filename(root_path, &path);
 
         // Check if this is a frozen snapshot based on filename
         let filename = path.file_stem().unwrap_or_default().to_string_lossy();
         let is_frozen = is_frozen_snapshot(&filename);
+
+        // Get locations from the pre-computed map (try both relative and absolute paths)
+        let locations = file_locations
+            .get(&path)
+            .or_else(|| file_locations.get(&abs_path))
+            .cloned()
+            .unwrap_or_default();
 
         Ok(Snapshot {
             sub: Default::default(),
@@ -584,6 +593,7 @@ impl Snapshot {
             vm_info: Default::default(),
             rel_path: path,
             frozen: is_frozen,
+            locations,
         })
     }
 }
@@ -778,10 +788,14 @@ impl VMess {
 
         let pool_path = &self.config.pool_path;
 
+        // Collect all lookup paths: pool_path, tmp_path, and shared_pools
+        let mut lookup_paths = vec![pool_path.clone(), self.config.tmp_path.clone()];
+        for shared_pool in &self.config.shared_pools {
+            lookup_paths.push(shared_pool.path.clone());
+        }
+
         // First, collect all qcow2 files and build backing chains
-        let mut qcow2_files = Vec::new();
-        let mut backing_chains: std::collections::HashMap<PathBuf, Vec<PathBuf>> =
-            std::collections::HashMap::new();
+        let mut backing_chains: Vec<crate::utils::BackingChainInfo> = Vec::new();
 
         for entry in
             std::fs::read_dir(&self.config.pool_path).with_context(|| format!("during read dir"))?
@@ -796,47 +810,40 @@ impl VMess {
 
             // Check if it's a qcow2 file
             if name.ends_with(".qcow2") || name.ends_with(".qcow") {
-                let rel_path = PathBuf::from(name.as_ref());
-                qcow2_files.push(rel_path.clone());
-
                 // Get the backing chain for this file
-                match get_qcow2_backing_chain(&path) {
-                    Ok(chain) => {
-                        // Convert absolute paths to relative paths within pool
-                        let rel_chain: Vec<PathBuf> = chain
-                            .into_iter()
-                            .filter_map(|abs_path| {
-                                if let Ok(stripped) = abs_path.strip_prefix(&pool_path) {
-                                    Some(stripped.to_path_buf())
-                                } else {
-                                    // If the path is not within the pool directory, skip it
-                                    None
-                                }
-                            })
-                            .collect();
+                match get_qcow2_backing_chain(&path, &lookup_paths) {
+                    Ok(chain_info) => {
+                        // Only include if the chain has files within the pool directory
+                        let has_pool_files = chain_info
+                            .chain
+                            .iter()
+                            .any(|abs_path| abs_path.strip_prefix(&pool_path).is_ok());
 
-                        // Only include if we could resolve all files in the chain
-                        if !rel_chain.is_empty() {
-                            backing_chains.insert(rel_path, rel_chain);
+                        if has_pool_files {
+                            backing_chains.push(chain_info);
                         }
-                        // If rel_chain is empty, skip this image entirely
                     }
                     Err(_) => {
                         // If we can't read the backing chain, skip this image entirely
-                        // (no longer treating as standalone file)
                     }
                 }
             }
         }
 
         // Now build the snapshot hierarchy based on actual backing relationships
-        for (_file_path, chain) in backing_chains.iter() {
-            if chain.is_empty() {
+        for chain_info in backing_chains.iter() {
+            if chain_info.chain.is_empty() {
                 continue;
             }
 
             // The root of the chain (last element) is the base image
-            let root_path = &chain[chain.len() - 1];
+            let root_path = &chain_info.chain[chain_info.chain.len() - 1];
+
+            // Convert to relative path within pool
+            let root_rel_path = match root_path.strip_prefix(&pool_path) {
+                Ok(rel_path) => rel_path.to_path_buf(),
+                Err(_) => continue, // Skip if not in pool directory
+            };
 
             // Extract the name for this image (remove .qcow2 extension, frozen suffix, and % parts)
             let root_name = root_path
@@ -858,10 +865,15 @@ impl VMess {
             // Ensure we have an image entry for the base
             let image = match pool.images.entry(base_name.clone()) {
                 btree_map::Entry::Vacant(v) => v.insert(Image {
-                    root: Snapshot::new(&pool_path, root_path.clone(), &files_to_domains)
-                        .with_context(|| {
-                            format!("during snapshot resolve of path {}", root_path.display())
-                        })?,
+                    root: Snapshot::new(
+                        &pool_path,
+                        root_rel_path.clone(),
+                        &files_to_domains,
+                        &chain_info.locations_map,
+                    )
+                    .with_context(|| {
+                        format!("during snapshot resolve of path {}", root_path.display())
+                    })?,
                 }),
                 btree_map::Entry::Occupied(o) => o.into_mut(),
             };
@@ -880,14 +892,20 @@ impl VMess {
             }
 
             // Build the hierarchy from root to current file
-            if chain.len() > 1 {
+            if chain_info.chain.len() > 1 {
                 let mut current_vm_info = image.root.vm_info.clone();
                 let mut current_node = &mut image.root;
 
                 // Process chain from root to current file (reverse order)
-                for i in (0..chain.len() - 1).rev() {
-                    let current_file = &chain[i];
-                    let parent_file = &chain[i + 1];
+                for i in (0..chain_info.chain.len() - 1).rev() {
+                    let current_file = &chain_info.chain[i];
+                    let parent_file = &chain_info.chain[i + 1];
+
+                    // Convert to relative paths within pool
+                    let current_rel_file = match current_file.strip_prefix(&pool_path) {
+                        Ok(rel_path) => rel_path.to_path_buf(),
+                        Err(_) => continue, // Skip if not in pool directory
+                    };
 
                     // Generate a snapshot name based on the difference from parent
                     let current_name_raw = current_file.file_stem().unwrap().to_string_lossy();
@@ -912,17 +930,22 @@ impl VMess {
                     let snapshot_entry = current_node.sub.entry(snapshot_name.clone());
                     let snapshot = match snapshot_entry {
                         btree_map::Entry::Vacant(v) => {
-                            let mut new_snapshot =
-                                Snapshot::new(&pool_path, current_file.clone(), &files_to_domains)
-                                    .with_context(|| {
-                                        format!(
-                                            "during snapshot resolve of path {}",
-                                            current_file.display()
-                                        )
-                                    })?;
+                            let mut new_snapshot = Snapshot::new(
+                                &pool_path,
+                                current_rel_file.clone(),
+                                &files_to_domains,
+                                &chain_info.locations_map,
+                            )
+                            .with_context(|| {
+                                format!(
+                                    "during snapshot resolve of path {}",
+                                    current_file.display()
+                                )
+                            })?;
 
                             // Load JSON for this snapshot if it exists
-                            let json_base_raw = current_file.file_stem().unwrap().to_string_lossy();
+                            let json_base_raw =
+                                current_rel_file.file_stem().unwrap().to_string_lossy();
                             let json_base = strip_frozen_suffix(&json_base_raw);
                             let json_path = self
                                 .config

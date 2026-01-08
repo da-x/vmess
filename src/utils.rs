@@ -1,4 +1,5 @@
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
@@ -11,6 +12,12 @@ use regex::Regex;
 
 lazy_static::lazy_static! {
     static ref FROZEN_SUFFIX: Regex = Regex::new(r"@@[a-f0-9]+$").unwrap();
+}
+
+#[derive(Debug)]
+pub(crate) struct BackingChainInfo {
+    pub chain: Vec<PathBuf>,
+    pub locations_map: HashMap<PathBuf, Vec<PathBuf>>, // Maps each file in chain to its real locations
 }
 
 pub(crate) fn bash_stdout(cmd: String) -> Result<String, Error> {
@@ -117,10 +124,13 @@ pub(crate) fn read_qcow2_backing_file(qcow2_path: &Path) -> Result<Option<String
     Ok(Some(backing_file_name))
 }
 
-pub(crate) fn get_qcow2_backing_chain(qcow2_path: &Path) -> Result<Vec<PathBuf>, Error> {
+pub(crate) fn get_qcow2_backing_chain(
+    qcow2_path: &Path,
+    lookup_paths: &[PathBuf],
+) -> Result<BackingChainInfo, Error> {
     let mut chain = vec![];
     let mut current_path = qcow2_path.to_path_buf();
-    let base_dir = qcow2_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut locations_map = HashMap::new();
 
     loop {
         // Check if we've seen this path before (loop detection)
@@ -138,43 +148,88 @@ pub(crate) fn get_qcow2_backing_chain(qcow2_path: &Path) -> Result<Vec<PathBuf>,
             )));
         }
 
+        // Find all locations where this file exists as a real file (not symlink)
+        let mut file_locations = Vec::new();
+
+        // Try to get relative path from the first lookup path
+        let relative_path = current_path
+            .file_name()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| current_path.clone());
+
+        for lookup_path in lookup_paths {
+            let candidate_path = lookup_path.join(&relative_path);
+
+            if candidate_path.exists() {
+                // Check if it's a real file, not a symlink
+                if let Ok(symlink_metadata) = std::fs::symlink_metadata(&candidate_path) {
+                    if symlink_metadata.file_type().is_file()
+                        && !symlink_metadata.file_type().is_symlink()
+                    {
+                        file_locations.push(lookup_path.clone());
+                    }
+                }
+            }
+        }
+
+        // Store locations for this file
+        locations_map.insert(current_path.clone(), file_locations);
+
         // Add current path to chain
         chain.push(current_path.clone());
 
         // Read backing store from current file
         match read_qcow2_backing_file(&current_path)? {
             Some(backing_name) => {
-                let backing_path = if Path::new(&backing_name).is_absolute() {
-                    PathBuf::from(backing_name)
-                } else {
-                    base_dir.join(backing_name)
-                };
-
-                // Stop if backing store points outside current directory
-                if let Ok(canonical_backing) = backing_path.canonicalize() {
-                    if let Ok(canonical_base) = base_dir.canonicalize() {
-                        if !canonical_backing.starts_with(&canonical_base) {
-                            return Err(Error::FreeText(format!(
-                                "Backing store points outside current directory: {}",
-                                backing_path.display()
-                            )));
-                        }
-                    }
-                } else {
+                // Skip images with backing store names that contain paths
+                if backing_name.contains('/')
+                    || backing_name.contains('\\')
+                    || Path::new(&backing_name).is_absolute()
+                {
                     return Err(Error::FreeText(format!(
-                        "Cannot resolve backing store path: {}",
-                        backing_path.display()
+                        "Backing store filename contains path separators, skipping: '{}'",
+                        backing_name
                     )));
                 }
 
-                // Continue with the backing file
-                current_path = backing_path;
+                // Simple filename - search in all lookup directories
+                let mut found_backing_path = None;
+                for lookup_path in lookup_paths {
+                    let candidate_path = lookup_path.join(&backing_name);
+                    if candidate_path.exists() {
+                        // Check if it's a real file, not a symlink
+                        if let Ok(symlink_metadata) = std::fs::symlink_metadata(&candidate_path) {
+                            if symlink_metadata.file_type().is_file()
+                                && !symlink_metadata.file_type().is_symlink()
+                            {
+                                found_backing_path = Some(candidate_path);
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                match found_backing_path {
+                    Some(backing_path) => {
+                        // Continue with the backing file
+                        current_path = backing_path;
+                    }
+                    None => {
+                        return Err(Error::FreeText(format!(
+                            "Cannot find backing file '{}' in any lookup directory",
+                            backing_name
+                        )));
+                    }
+                }
             }
             None => break, // No backing file
         }
     }
 
-    Ok(chain)
+    Ok(BackingChainInfo {
+        chain,
+        locations_map,
+    })
 }
 
 pub(crate) fn is_frozen_snapshot(filename: &str) -> bool {
