@@ -401,8 +401,8 @@ pub struct Config {
     pub multi_user: bool,
 
     #[serde(default)]
-    #[serde(rename = "pool")]
-    pub extra_pool_paths: Vec<NamedPoolPath>,
+    #[serde(rename = "shared-pools")]
+    pub shared_pools: Vec<NamedPoolPath>,
 
     #[serde(default)]
     #[serde(rename = "ssh-config")]
@@ -633,10 +633,10 @@ impl VMess {
         )
         .unwrap();
 
-        let mut extra_pool_paths = vec![];
-        for extra_pool_path in config.extra_pool_paths {
+        let mut shared_pools = vec![];
+        for shared_pool in config.shared_pools {
             let path = PathBuf::try_from(
-                extra_pool_path
+                shared_pool
                     .path
                     .into_os_string()
                     .into_string()
@@ -644,12 +644,12 @@ impl VMess {
                     .replace("$USER", &std::env::var("USER").expect("USER not defined")),
             )
             .unwrap();
-            extra_pool_paths.push(NamedPoolPath {
+            shared_pools.push(NamedPoolPath {
                 path,
-                name: extra_pool_path.name,
+                name: shared_pool.name,
             })
         }
-        config.extra_pool_paths = extra_pool_paths;
+        config.shared_pools = shared_pools;
 
         Ok(Self { command, config })
     }
@@ -1501,7 +1501,7 @@ impl VMess {
 
         let new = 'x: {
             if let Some(pool_name) = &params.pool {
-                for pool in &self.config.extra_pool_paths {
+                for pool in &self.config.shared_pools {
                     if &pool.name == pool_name {
                         break 'x &pool.path;
                     }
@@ -1883,13 +1883,6 @@ impl VMess {
                 let tmp_image_path = self.config.tmp_path.join(&image_path);
                 if tmp_image_path.exists() {
                     std::fs::remove_file(&tmp_image_path)?;
-                }
-
-                for pool in &self.config.extra_pool_paths {
-                    let extra_pool_path = pool.path.join(&image_path);
-                    if extra_pool_path.exists() {
-                        std::fs::remove_file(extra_pool_path)?;
-                    }
                 }
 
                 Ok(())
