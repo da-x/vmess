@@ -478,7 +478,6 @@ impl VMInfo {
     }
 }
 
-
 #[derive(Debug)]
 struct VM {
     name: String,
@@ -836,7 +835,7 @@ impl VMess {
             let root_path = &chain_info.chain[chain_info.chain.len() - 1];
 
             // Convert to relative path within pool
-            let root_rel_path = match root_path.strip_prefix(&pool_path) {
+            let _root_rel_path = match root_path.strip_prefix(&pool_path) {
                 Ok(rel_path) => rel_path.to_path_buf(),
                 Err(_) => continue, // Skip if not in pool directory
             };
@@ -858,55 +857,27 @@ impl VMess {
                     clean_root_name
                 };
 
-            // Ensure we have an image entry for the base
-            let image = match pool.images.entry(base_name.clone()) {
-                btree_map::Entry::Vacant(v) => v.insert(Snapshot::new(
-                        &pool_path,
-                        root_rel_path.clone(),
-                        &files_to_domains,
-                        &chain_info.locations_map,
-                    )
-                    .with_context(|| {
-                        format!("during snapshot resolve of path {}", root_path.display())
-                    })?),
-                btree_map::Entry::Occupied(o) => o.into_mut(),
-            };
+            // Process entire chain uniformly, from root (last) to leaf (first)
+            let mut current_vm_info = VMInfo::default();
+            let mut current_path: Vec<String> = vec![]; // Track path to current snapshot
 
-            // Load JSON for root if it exists
-            let json_path = self
-                .config
-                .pool_path
-                .join(PathBuf::from(format!("{}.json", base_name)));
-            if json_path.exists() {
-                image.vm_info.merge(
-                    &read_json_path(&json_path).with_context(|| {
-                        format!("during merging of json {}", json_path.display())
-                    })?,
-                );
-            }
+            for (i, current_file) in chain_info.chain.iter().enumerate().rev() {
+                // Convert to relative path within pool
+                let current_rel_file = match current_file.strip_prefix(&pool_path) {
+                    Ok(rel_path) => rel_path.to_path_buf(),
+                    Err(_) => continue, // Skip if not in pool directory
+                };
 
-            // Build the hierarchy from root to current file
-            if chain_info.chain.len() > 1 {
-                let mut current_vm_info = image.vm_info.clone();
-                let mut current_node = image;
+                let current_name_raw = current_file.file_stem().unwrap().to_string_lossy();
+                let current_name = strip_frozen_suffix(&current_name_raw);
 
-                // Process chain from root to current file (reverse order)
-                for i in (0..chain_info.chain.len() - 1).rev() {
-                    let current_file = &chain_info.chain[i];
+                let (snapshot_name, is_root): (String, bool) = if i == chain_info.chain.len() - 1 {
+                    // This is the root image
+                    (base_name.clone(), true)
+                } else {
+                    // This is a snapshot - generate name based on parent
                     let parent_file = &chain_info.chain[i + 1];
-
-                    // Convert to relative paths within pool
-                    let current_rel_file = match current_file.strip_prefix(&pool_path) {
-                        Ok(rel_path) => rel_path.to_path_buf(),
-                        Err(_) => continue, // Skip if not in pool directory
-                    };
-
-                    // Generate a snapshot name based on the difference from parent
-                    let current_name_raw = current_file.file_stem().unwrap().to_string_lossy();
                     let parent_name_raw = parent_file.file_stem().unwrap().to_string_lossy();
-
-                    // Strip frozen suffixes for name generation
-                    let current_name = strip_frozen_suffix(&current_name_raw);
                     let parent_name = strip_frozen_suffix(&parent_name_raw);
 
                     let snapshot_name = current_name
@@ -915,16 +886,31 @@ impl VMess {
                         .replace('%', ".");
 
                     let snapshot_name = if snapshot_name.is_empty() {
-                        current_name
+                        current_name.to_string()
                     } else {
                         snapshot_name
                     };
+                    (snapshot_name, false)
+                };
 
-                    // Create snapshot entry
-                    let snapshot_entry = current_node.sub.entry(snapshot_name.clone());
-                    let snapshot = match snapshot_entry {
+                // Load and merge JSON for this snapshot if it exists
+                let json_base = if is_root { &base_name } else { &current_name };
+                let json_path = self
+                    .config
+                    .pool_path
+                    .join(PathBuf::from(format!("{}.json", json_base)));
+                if json_path.exists() {
+                    current_vm_info.merge(&read_json_path(&json_path).with_context(|| {
+                        format!("during merging of json {}", json_path.display())
+                    })?);
+                }
+
+                // Create or get the snapshot and update it
+                if is_root {
+                    // Root image goes into pool.images
+                    match pool.images.entry(snapshot_name.clone()) {
                         btree_map::Entry::Vacant(v) => {
-                            let mut new_snapshot = Snapshot::new(
+                            let mut snapshot = Snapshot::new(
                                 &pool_path,
                                 current_rel_file.clone(),
                                 &files_to_domains,
@@ -936,32 +922,46 @@ impl VMess {
                                     current_file.display()
                                 )
                             })?;
-
-                            // Load JSON for this snapshot if it exists
-                            let json_base_raw =
-                                current_rel_file.file_stem().unwrap().to_string_lossy();
-                            let json_base = strip_frozen_suffix(&json_base_raw);
-                            let json_path = self
-                                .config
-                                .pool_path
-                                .join(PathBuf::from(format!("{}.json", json_base)));
-                            if json_path.exists() {
-                                current_vm_info.merge(&read_json_path(&json_path).with_context(
-                                    || {
-                                        format!(
-                                            "during reading of json for snapshot {}",
-                                            json_path.display()
-                                        )
-                                    },
-                                )?);
-                            }
-                            new_snapshot.vm_info = current_vm_info.clone();
-                            v.insert(new_snapshot)
+                            snapshot.vm_info = current_vm_info.clone();
+                            v.insert(snapshot);
                         }
-                        btree_map::Entry::Occupied(o) => o.into_mut(),
+                        btree_map::Entry::Occupied(o) => {
+                            o.into_mut().vm_info = current_vm_info.clone();
+                        }
                     };
+                    current_path = vec![snapshot_name];
+                } else {
+                    // Non-root snapshots go into current path
+                    // Navigate to current parent
+                    let mut current_snapshot = pool.images.get_mut(&current_path[0]).unwrap();
+                    for path_part in &current_path[1..] {
+                        current_snapshot = current_snapshot.sub.get_mut(path_part).unwrap();
+                    }
 
-                    current_node = snapshot;
+                    // Create or update the snapshot
+                    match current_snapshot.sub.entry(snapshot_name.clone()) {
+                        btree_map::Entry::Vacant(v) => {
+                            let mut snapshot = Snapshot::new(
+                                &pool_path,
+                                current_rel_file.clone(),
+                                &files_to_domains,
+                                &chain_info.locations_map,
+                            )
+                            .with_context(|| {
+                                format!(
+                                    "during snapshot resolve of path {}",
+                                    current_file.display()
+                                )
+                            })?;
+                            snapshot.vm_info = current_vm_info.clone();
+                            v.insert(snapshot);
+                        }
+                        btree_map::Entry::Occupied(o) => {
+                            o.into_mut().vm_info = current_vm_info.clone();
+                        }
+                    }
+
+                    current_path.push(snapshot_name);
                 }
             }
         }
@@ -1980,9 +1980,7 @@ impl VMess {
 
                 Ok(())
             },
-            by_name: &|closure, image, path| {
-                (closure.by_snapshot)(closure, &image, &image, path)
-            },
+            by_name: &|closure, image, path| (closure.by_snapshot)(closure, &image, &image, path),
         };
 
         for (key, image) in pool.images.iter() {
