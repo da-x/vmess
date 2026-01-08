@@ -790,7 +790,7 @@ impl VMess {
         }
 
         // First, collect all qcow2 files and build backing chains
-        let mut backing_chains: Vec<crate::utils::BackingChainInfo> = Vec::new();
+        let mut backing_chains: Vec<(String, crate::utils::BackingChainInfo)> = Vec::new();
 
         for entry in
             std::fs::read_dir(&self.config.pool_path).with_context(|| format!("during read dir"))?
@@ -815,7 +815,13 @@ impl VMess {
                             .any(|abs_path| abs_path.strip_prefix(&pool_path).is_ok());
 
                         if has_pool_files {
-                            backing_chains.push(chain_info);
+                            // Extract basename from the original filename
+                            let basename = if let Some(stem) = Path::new(&*name).file_stem() {
+                                stem.to_string_lossy().to_string()
+                            } else {
+                                name.to_string()
+                            };
+                            backing_chains.push((basename, chain_info));
                         }
                     }
                     Err(_) => {
@@ -826,36 +832,10 @@ impl VMess {
         }
 
         // Now build the snapshot hierarchy based on actual backing relationships
-        for chain_info in backing_chains.iter() {
+        for (base_name, chain_info) in backing_chains.iter() {
             if chain_info.chain.is_empty() {
                 continue;
             }
-
-            // The root of the chain (last element) is the base image
-            let root_path = &chain_info.chain[chain_info.chain.len() - 1];
-
-            // Convert to relative path within pool
-            let _root_rel_path = match root_path.strip_prefix(&pool_path) {
-                Ok(rel_path) => rel_path.to_path_buf(),
-                Err(_) => continue, // Skip if not in pool directory
-            };
-
-            // Extract the name for this image (remove .qcow2 extension, frozen suffix, and % parts)
-            let root_name = root_path
-                .file_stem()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned();
-
-            // Strip frozen suffix if present
-            let clean_root_name = strip_frozen_suffix(&root_name);
-
-            let base_name =
-                if let Some(cap) = PARSE_QCOW2.captures(&format!("{}.qcow2", clean_root_name)) {
-                    cap.get(1).unwrap().as_str().to_owned()
-                } else {
-                    clean_root_name
-                };
 
             // Process entire chain uniformly, from root (last) to leaf (first)
             let mut current_vm_info = VMInfo::default();
@@ -869,32 +849,24 @@ impl VMess {
                 };
 
                 let current_name_raw = current_file.file_stem().unwrap().to_string_lossy();
-                let current_name = strip_frozen_suffix(&current_name_raw);
+                let current_name_full = current_name_raw.to_string(); // Keep full name with frozen suffix
 
                 let (snapshot_name, is_root): (String, bool) = if i == chain_info.chain.len() - 1 {
                     // This is the root image
                     (base_name.clone(), true)
                 } else {
-                    // This is a snapshot - generate name based on parent
-                    let parent_file = &chain_info.chain[i + 1];
-                    let parent_name_raw = parent_file.file_stem().unwrap().to_string_lossy();
-                    let parent_name = strip_frozen_suffix(&parent_name_raw);
-
-                    let snapshot_name = current_name
-                        .replace(&parent_name, "")
-                        .trim_start_matches('%')
-                        .replace('%', ".");
-
-                    let snapshot_name = if snapshot_name.is_empty() {
-                        current_name.to_string()
-                    } else {
-                        snapshot_name
-                    };
+                    // This is a snapshot - just replace % with .
+                    let snapshot_name = current_name_full.replace('%', ".");
                     (snapshot_name, false)
                 };
 
                 // Load and merge JSON for this snapshot if it exists
-                let json_base = if is_root { &base_name } else { &current_name };
+                // JSON files are right next to qcow2 files with same basename
+                let json_base = if is_root { 
+                    base_name 
+                } else { 
+                    &current_name_full 
+                };
                 let json_path = self
                     .config
                     .pool_path
@@ -1031,7 +1003,7 @@ impl VMess {
             config: &Config,
             table: &mut Table,
             pool: &Pool,
-            image: &Snapshot,
+            _image: &Snapshot,
             snapshot: &Snapshot,
             path: String,
             filter_expr: &query::Expr,
@@ -1112,18 +1084,8 @@ impl VMess {
                 table.add_row(row);
             }
 
-            for (key, snapshot) in snapshot.sub.iter() {
-                by_snapshot(
-                    &columns,
-                    config,
-                    table,
-                    pool,
-                    image,
-                    &snapshot,
-                    format!("{}.{}", path, key),
-                    filter_expr,
-                );
-            }
+            // Don't recurse into sub-snapshots to avoid duplicates
+            // Each image in pool.images represents a complete snapshot chain
         }
 
         fn by_image(
@@ -1154,7 +1116,7 @@ impl VMess {
                 &mut table,
                 &pool,
                 &image,
-                key.clone(),
+                strip_frozen_suffix(key).replace('%', "."), // Strip frozen suffix and replace % with . for display
                 &filter_expr,
             );
         }
