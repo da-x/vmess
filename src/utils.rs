@@ -7,6 +7,11 @@ use std::io::{Read, Seek, SeekFrom};
 
 use super::Error;
 use log::debug;
+use regex::Regex;
+
+lazy_static::lazy_static! {
+    static ref FROZEN_SUFFIX: Regex = Regex::new(r"@@[a-f0-9]+$").unwrap();
+}
 
 pub(crate) fn bash_stdout(cmd: String) -> Result<String, Error> {
     use std::process::Command;
@@ -159,4 +164,12 @@ pub(crate) fn get_qcow2_backing_chain(qcow2_path: &Path) -> Result<Vec<PathBuf>,
     }
     
     Ok(chain)
+}
+
+pub(crate) fn is_frozen_snapshot(filename: &str) -> bool {
+    FROZEN_SUFFIX.is_match(filename)
+}
+
+pub(crate) fn strip_frozen_suffix(filename: &str) -> String {
+    FROZEN_SUFFIX.replace(filename, "").to_string()
 }

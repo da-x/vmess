@@ -442,10 +442,12 @@ struct Snapshot {
     size_mb: u64,
     vm_using: Option<String>,
     sub: BTreeMap<String, Snapshot>,
+    frozen: bool,
 }
 
 lazy_static! {
     static ref PARSE_QCOW2: Regex = Regex::new("^([^%]+)([%]([^.]*))?[.]qcow2?$").unwrap();
+    static ref FROZEN_SUFFIX: Regex = Regex::new("@@[a-f0-9]+$").unwrap();
 }
 
 impl Snapshot {
@@ -570,6 +572,10 @@ impl Snapshot {
         files_to_domains: &HashMap<PathBuf, String>,
     ) -> Result<Self, Error> {
         let abs_path = Self::get_filename(root_path, &path);
+        
+        // Check if this is a frozen snapshot based on filename
+        let filename = path.file_stem().unwrap_or_default().to_string_lossy();
+        let is_frozen = is_frozen_snapshot(&filename);
 
         Ok(Snapshot {
             sub: Default::default(),
@@ -577,6 +583,7 @@ impl Snapshot {
             size_mb: (std::fs::metadata(&abs_path)?.blocks() * 512) / (1024 * 1024),
             vm_info: Default::default(),
             rel_path: path,
+            frozen: is_frozen,
         })
     }
 }
@@ -831,17 +838,21 @@ impl VMess {
             // The root of the chain (last element) is the base image
             let root_path = &chain[chain.len() - 1];
 
-            // Extract the name for this image (remove .qcow2 extension and % parts)
+            // Extract the name for this image (remove .qcow2 extension, frozen suffix, and % parts)
             let root_name = root_path
                 .file_stem()
                 .unwrap()
                 .to_string_lossy()
                 .into_owned();
-            let base_name = if let Some(cap) = PARSE_QCOW2.captures(&format!("{}.qcow2", root_name))
+            
+            // Strip frozen suffix if present
+            let clean_root_name = strip_frozen_suffix(&root_name);
+            
+            let base_name = if let Some(cap) = PARSE_QCOW2.captures(&format!("{}.qcow2", clean_root_name))
             {
                 cap.get(1).unwrap().as_str().to_owned()
             } else {
-                root_name
+                clean_root_name
             };
 
             // Ensure we have an image entry for the base
@@ -879,15 +890,20 @@ impl VMess {
                     let parent_file = &chain[i + 1];
 
                     // Generate a snapshot name based on the difference from parent
-                    let current_name = current_file.file_stem().unwrap().to_string_lossy();
-                    let parent_name = parent_file.file_stem().unwrap().to_string_lossy();
+                    let current_name_raw = current_file.file_stem().unwrap().to_string_lossy();
+                    let parent_name_raw = parent_file.file_stem().unwrap().to_string_lossy();
+                    
+                    // Strip frozen suffixes for name generation
+                    let current_name = strip_frozen_suffix(&current_name_raw);
+                    let parent_name = strip_frozen_suffix(&parent_name_raw);
+                    
                     let snapshot_name = current_name
-                        .replace(parent_name.as_ref(), "")
+                        .replace(&parent_name, "")
                         .trim_start_matches('%')
                         .replace('%', ".");
 
                     let snapshot_name = if snapshot_name.is_empty() {
-                        current_name.into_owned()
+                        current_name
                     } else {
                         snapshot_name
                     };
@@ -906,7 +922,8 @@ impl VMess {
                                     })?;
 
                             // Load JSON for this snapshot if it exists
-                            let json_base = current_file.file_stem().unwrap().to_string_lossy();
+                            let json_base_raw = current_file.file_stem().unwrap().to_string_lossy();
+                            let json_base = strip_frozen_suffix(&json_base_raw);
                             let json_path = self
                                 .config
                                 .pool_path
