@@ -88,9 +88,6 @@ pub enum Error {
     #[error("Template {0} doesn't exist")]
     TemplateDoesntExist(String),
 
-    #[error("Renaming across parents not supported")]
-    RenameAcrossParentsUnsupported,
-
     #[error("Cannot {1} snapshot {0} - has sub snapshots")]
     HasSubSnapshots(String, &'static str),
 
@@ -435,13 +432,56 @@ pub struct VMess {
     command: Option<CommandMode>,
 }
 
+#[derive(Debug, Default)]
+struct SnapshotCollection {
+    snapshots: BTreeMap<String, Snapshot>,
+}
+
+impl SnapshotCollection {
+    fn get(&self, key: &str) -> Option<&Snapshot> {
+        self.snapshots.get(key)
+    }
+
+    fn get_mut(&mut self, key: &str) -> Option<&mut Snapshot> {
+        self.snapshots.get_mut(key)
+    }
+
+    fn entry(&mut self, key: String) -> std::collections::btree_map::Entry<'_, String, Snapshot> {
+        self.snapshots.entry(key)
+    }
+
+    fn iter(&self) -> std::collections::btree_map::Iter<'_, String, Snapshot> {
+        self.snapshots.iter()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.snapshots.is_empty()
+    }
+
+    fn find_by_name(&self, name: &str) -> Option<&Snapshot> {
+        // First check direct match at this level
+        if let Some(snapshot) = self.snapshots.get(name) {
+            return Some(snapshot);
+        }
+
+        // Then search recursively in sub-collections
+        for (_, snapshot) in self.snapshots.iter() {
+            if let Some(found) = snapshot.sub.find_by_name(name) {
+                return Some(found);
+            }
+        }
+
+        None
+    }
+}
+
 #[derive(Debug)]
 struct Snapshot {
     rel_path: PathBuf,
     vm_info: VMInfo,
     size_mb: u64,
     vm_using: Option<String>,
-    sub: BTreeMap<String, Snapshot>,
+    sub: SnapshotCollection,
     frozen: bool,
     locations: Vec<PathBuf>,
 }
@@ -486,7 +526,7 @@ struct VM {
 
 #[derive(Debug)]
 pub struct Pool {
-    images: BTreeMap<String, Snapshot>,
+    images: SnapshotCollection,
     vms: BTreeMap<String, VM>,
 }
 
@@ -503,57 +543,18 @@ impl<'a> GetInfo<'a> {
 
 impl Pool {
     fn get_by_name<'a>(&'a self, name: &str) -> Result<GetInfo<'a>, Error> {
-        fn by_snapshot<'a>(
-            pool: &'a Pool,
-            lookup: &str,
-            image: &Snapshot,
-            snapshot: &'a Snapshot,
-            level: usize,
-            name_path: String,
-        ) -> Option<GetInfo<'a>> {
-            if lookup == &name_path {
-                return Some(GetInfo {
-                    snap: snapshot,
-                    vm: if let Some(name) = &snapshot.vm_using {
-                        pool.vms.get(name)
-                    } else {
-                        None
-                    },
-                });
-            }
-
-            for (key, snapshot) in snapshot.sub.iter() {
-                if let Some(i) = by_snapshot(
-                    pool,
-                    lookup,
-                    image,
-                    &snapshot,
-                    level + 1,
-                    format!("{}.{}", name_path, key),
-                ) {
-                    return Some(i);
-                }
-            }
-
-            None
+        if let Some(snapshot) = self.images.find_by_name(name) {
+            Ok(GetInfo {
+                snap: snapshot,
+                vm: if let Some(vm_name) = &snapshot.vm_using {
+                    self.vms.get(vm_name)
+                } else {
+                    None
+                },
+            })
+        } else {
+            Err(Error::NotFound(name.to_owned()))
         }
-
-        fn by_image<'a>(
-            lookup: &str,
-            pool: &'a Pool,
-            image: &'a Snapshot,
-            name_path: String,
-        ) -> Option<GetInfo<'a>> {
-            by_snapshot(pool, lookup, &image, &image, 0, name_path.clone())
-        }
-
-        for (key, image) in self.images.iter() {
-            if let Some(i) = by_image(name, self, &image, key.clone()) {
-                return Ok(i);
-            }
-        }
-
-        Err(Error::NotFound(name.to_owned()))
     }
 }
 
@@ -862,10 +863,10 @@ impl VMess {
 
                 // Load and merge JSON for this snapshot if it exists
                 // JSON files are right next to qcow2 files with same basename
-                let json_base = if is_root { 
-                    base_name 
-                } else { 
-                    &current_name_full 
+                let json_base = if is_root {
+                    base_name
+                } else {
+                    &current_name_full
                 };
                 let json_path = self
                     .config
@@ -1750,34 +1751,17 @@ impl VMess {
     fn rename(&mut self, params: Rename) -> Result<(), Error> {
         let pool = self.get_pool()?;
 
-        // Check that the VM exists
+        // Check that the source snapshot exists
         let existing = pool.get_by_name(&params.name)?;
         if let Some(_) = &existing.vm {
             // TODO: this can have a workaround
             return Err(Error::CurrentlyDefined);
         }
 
-        let mut parts: Vec<_> = params.name.split(".").collect();
-        let _name = parts.pop().expect("name");
-        let existing_parent_name = parts.join(".");
-
         // Check that the destination does not exist
         if let Err(Error::NotFound(_)) = pool.get_by_name(&params.new_name) {
-            let mut parts: Vec<_> = params.new_name.split(".").collect();
-            let name = parts.pop().expect("name");
-            let parent_name = parts.join(".");
-            if parent_name != existing_parent_name {
-                return Err(Error::RenameAcrossParentsUnsupported);
-            }
-
-            let new_base_name = {
-                if parent_name == "" {
-                    PathBuf::from(format!("{name}.qcow2"))
-                } else {
-                    let parent = pool.get_by_name(&parent_name)?;
-                    parent.snap.join(name)
-                }
-            };
+            // Generate new filename based on the new name
+            let new_base_name = PathBuf::from(format!("{}.qcow2", params.new_name));
             let existing = &existing.image_path();
 
             let tmp_image_path = self.config.tmp_path.join(existing);
