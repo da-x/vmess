@@ -19,12 +19,11 @@ use log::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use structopt::StructOpt;
+use strum::IntoEnumIterator;
+use strum_macros::EnumIter;
 use thiserror::Error;
 use users::get_current_uid;
 use xmltree::{Element, XMLNode};
-use strum::IntoEnumIterator;
-use strum_macros::EnumIter;
-
 
 mod utils;
 
@@ -113,14 +112,13 @@ pub trait AddContext<T> {
 }
 
 impl<T, E> AddContext<T> for Result<T, E>
-    where E: Into<Error>
+where
+    E: Into<Error>,
 {
     fn with_context(self, f: impl FnOnce() -> String) -> Result<T, Error> {
         match self {
             Ok(v) => Ok(v),
-            Err(_) => {
-                self.map_err(|e| Error::Context(f(), Box::new(e.into())))
-            }
+            Err(_) => self.map_err(|e| Error::Context(f(), Box::new(e.into()))),
         }
     }
 }
@@ -420,7 +418,6 @@ pub struct NamedPoolPath {
     pub path: PathBuf,
 }
 
-
 #[derive(Debug, Deserialize, Clone)]
 pub struct SSHConfig {
     #[serde(rename = "identity-file")]
@@ -563,17 +560,11 @@ impl Pool {
 }
 
 impl Snapshot {
-    fn get_filename(
-        root_path: &PathBuf,
-        path: &PathBuf,
-    ) -> PathBuf {
+    fn get_filename(root_path: &PathBuf, path: &PathBuf) -> PathBuf {
         return root_path.join(path);
     }
 
-    fn exists(
-        root_path: &PathBuf,
-        path: &PathBuf,
-    ) -> bool {
+    fn exists(root_path: &PathBuf, path: &PathBuf) -> bool {
         return Self::get_filename(root_path, &path).exists();
     }
 
@@ -644,21 +635,23 @@ impl VMess {
 
         let mut extra_pool_paths = vec![];
         for extra_pool_path in config.extra_pool_paths {
-            let path = PathBuf::try_from(extra_pool_path.path
-                .into_os_string()
-                .into_string()
-                .unwrap()
-                .replace("$USER", &std::env::var("USER").expect("USER not defined"))).unwrap();
+            let path = PathBuf::try_from(
+                extra_pool_path
+                    .path
+                    .into_os_string()
+                    .into_string()
+                    .unwrap()
+                    .replace("$USER", &std::env::var("USER").expect("USER not defined")),
+            )
+            .unwrap();
             extra_pool_paths.push(NamedPoolPath {
-                path, name: extra_pool_path.name
+                path,
+                name: extra_pool_path.name,
             })
         }
         config.extra_pool_paths = extra_pool_paths;
 
-        Ok(Self {
-            command,
-            config
-        })
+        Ok(Self { command, config })
     }
 
     fn get_vm_prefix(&self) -> String {
@@ -749,7 +742,10 @@ impl VMess {
         let vmname_prefix = self.get_vm_prefix();
 
         if with_vm_list {
-            for line in ibash_stdout!("virsh list --all --name").with_context(|| format!("during virsh list"))?.lines() {
+            for line in ibash_stdout!("virsh list --all --name")
+                .with_context(|| format!("during virsh list"))?
+                .lines()
+            {
                 let line = line.trim();
                 if line.is_empty() {
                     continue;
@@ -762,18 +758,25 @@ impl VMess {
                     continue;
                 };
 
-                match Self::load_extra_domain_info(&mut files_to_domains, short_vmname, vmname, &mut pool) {
-                    Ok(_) => {},
+                match Self::load_extra_domain_info(
+                    &mut files_to_domains,
+                    short_vmname,
+                    vmname,
+                    &mut pool,
+                ) {
+                    Ok(_) => {}
                     Err(_) => {
                         // Assume VM went away during iteration
                         pool.vms.remove(short_vmname);
-                    },
+                    }
                 }
             }
         }
 
         let pool_path = &self.config.pool_path;
-        for entry in std::fs::read_dir(&self.config.pool_path).with_context(|| format!("during read dir"))? {
+        for entry in
+            std::fs::read_dir(&self.config.pool_path).with_context(|| format!("during read dir"))?
+        {
             let entry = entry.with_context(|| format!("during entry resolve"))?;
             let name = entry.file_name();
             let name = name.to_string_lossy();
@@ -796,19 +799,26 @@ impl VMess {
                 }
 
                 let image = match pool.images.entry(name.to_owned()) {
-                    btree_map::Entry::Vacant(v) => {
-                        v.insert(Image {
-                            root: Snapshot::new(&pool_path, path.clone(), &files_to_domains)
-                                .with_context(|| format!("during snapshot resolve of path {}", path.display()))?,
-                        })
-                    }
+                    btree_map::Entry::Vacant(v) => v.insert(Image {
+                        root: Snapshot::new(&pool_path, path.clone(), &files_to_domains)
+                            .with_context(|| {
+                                format!("during snapshot resolve of path {}", path.display())
+                            })?,
+                    }),
                     btree_map::Entry::Occupied(o) => o.into_mut(),
                 };
 
-                let json_path = self.config.pool_path.join(PathBuf::from(format!("{}.json", name)));
+                let json_path = self
+                    .config
+                    .pool_path
+                    .join(PathBuf::from(format!("{}.json", name)));
                 if json_path.exists() {
-                    image.root.vm_info.merge(&read_json_path(&json_path)
-                        .with_context(|| format!("during merging of json {}", json_path.display()))?);
+                    image
+                        .root
+                        .vm_info
+                        .merge(&read_json_path(&json_path).with_context(|| {
+                            format!("during merging of json {}", json_path.display())
+                        })?);
                 }
 
                 let mut vm_info = image.root.vm_info.clone();
@@ -832,13 +842,25 @@ impl VMess {
 
                     let image = match node.sub.entry(sub.to_owned()) {
                         btree_map::Entry::Vacant(v) => {
-                            let mut snapshot = Snapshot::new(&pool_path, path.clone(), &files_to_domains)
-                                .with_context(|| format!("during snapshot resolve of path {}", path.display()))?;
-                            let json_path =
-                                self.config.pool_path.join(PathBuf::from(format!("{}.json", path_base.display())));
+                            let mut snapshot =
+                                Snapshot::new(&pool_path, path.clone(), &files_to_domains)
+                                    .with_context(|| {
+                                        format!(
+                                            "during snapshot resolve of path {}",
+                                            path.display()
+                                        )
+                                    })?;
+                            let json_path = self
+                                .config
+                                .pool_path
+                                .join(PathBuf::from(format!("{}.json", path_base.display())));
                             if json_path.exists() {
-                                vm_info.merge(&read_json_path(&json_path)
-                                    .with_context(|| format!("during reading of json for sub {}", json_path.display()))?);
+                                vm_info.merge(&read_json_path(&json_path).with_context(|| {
+                                    format!(
+                                        "during reading of json for sub {}",
+                                        json_path.display()
+                                    )
+                                })?);
                             }
                             snapshot.vm_info = vm_info.clone();
                             v.insert(snapshot)
@@ -855,12 +877,14 @@ impl VMess {
     }
 
     fn list(&mut self, params: List) -> Result<(), Error> {
-        let pool = self.get_pool().with_context(|| format!("during get_pool"))?;
+        let pool = self
+            .get_pool()
+            .with_context(|| format!("during get_pool"))?;
 
         use indexmap::IndexSet;
         use prettytable::{format, Cell, Row, Table};
-        let filter_expr = query::Expr::parse_cmd(&params.filter)
-            .with_context(|| format!("during parse cmd"))?;
+        let filter_expr =
+            query::Expr::parse_cmd(&params.filter).with_context(|| format!("during parse cmd"))?;
 
         let mut table = Table::new();
         table.set_format(*format::consts::FORMAT_NO_BORDER_LINE_SEPARATOR);
@@ -884,7 +908,9 @@ impl VMess {
             Some(s) => {
                 for s in s.split(",") {
                     match hm.remove(s) {
-                        Some(x) => { columns.insert(x); },
+                        Some(x) => {
+                            columns.insert(x);
+                        }
                         None => {}
                     }
                 }
@@ -900,7 +926,7 @@ impl VMess {
 
         if !params.no_headers {
             table.set_titles(Row::new(
-                    columns
+                columns
                     .iter()
                     .map(|x| Cell::new(&ron::ser::to_string(x).expect("serialization")))
                     .collect(),
@@ -1016,7 +1042,16 @@ impl VMess {
             path: String,
             filter_expr: &query::Expr,
         ) {
-            by_snapshot(&columns, config, table, pool, &image, &image.root, path, filter_expr);
+            by_snapshot(
+                &columns,
+                config,
+                table,
+                pool,
+                &image,
+                &image.root,
+                path,
+                filter_expr,
+            );
         }
 
         for (key, image) in pool.images.iter() {
@@ -1051,7 +1086,11 @@ impl VMess {
         Ok(Element::parse(contents.as_bytes())?)
     }
 
-    fn modify_xml_using_overrides(xml: &mut Element, overrides: &Overrides, fullname: &str) -> Result<(), Error> {
+    fn modify_xml_using_overrides(
+        xml: &mut Element,
+        overrides: &Overrides,
+        fullname: &str,
+    ) -> Result<(), Error> {
         if let Some(given_memory) = overrides.memory_gb {
             if let Some(memory) = xml.get_mut_child("memory") {
                 memory
@@ -1093,13 +1132,27 @@ impl VMess {
 
         if overrides.uefi {
             if let Some(os) = xml.get_mut_child("os") {
-                let code = if overrides.secure_boot { ".secboot" } else {".cc" };
-                let vars = if overrides.secure_boot { ".secboot." } else {"." };
-                let attr = if overrides.secure_boot { " secure='yes' " } else { " " };
+                let code = if overrides.secure_boot {
+                    ".secboot"
+                } else {
+                    ".cc"
+                };
+                let vars = if overrides.secure_boot {
+                    ".secboot."
+                } else {
+                    "."
+                };
+                let attr = if overrides.secure_boot {
+                    " secure='yes' "
+                } else {
+                    " "
+                };
                 let sb = if overrides.secure_boot { "yes" } else { "no" };
-                let autoselection = is_version_at_least(&ibash_stdout!("virsh --version")?, &[8, 6]);
+                let autoselection =
+                    is_version_at_least(&ibash_stdout!("virsh --version")?, &[8, 6]);
                 let new_elem = if autoselection {
-                    format!(r#"
+                    format!(
+                        r#"
     <os>
         <firmware>
           <feature enabled="{sb}" name="enrolled-keys"/>
@@ -1107,9 +1160,11 @@ impl VMess {
         </firmware>
         <bootmenu enable='yes'/>
     </os>
-    "#)
+    "#
+                    )
                 } else {
-                    format!(r#"
+                    format!(
+                        r#"
     <os>
         <firmware>
           <feature enabled='yes' name='enrolled-keys'/>
@@ -1119,7 +1174,8 @@ impl VMess {
         <nvram template='/usr/share/edk2/ovmf/OVMF_VARS{vars}fd'>/var/lib/libvirt/qemu/nvram/{fullname}_VARS.fd</nvram>
         <bootmenu enable='yes'/>
     </os>
-    "#)
+    "#
+                    )
                 };
                 let elem = Element::parse(new_elem.as_bytes())?;
                 for child in elem.children.into_iter() {
@@ -1127,7 +1183,8 @@ impl VMess {
                 }
 
                 if autoselection {
-                    os.attributes.insert("firmware".to_owned(), "efi".to_owned());
+                    os.attributes
+                        .insert("firmware".to_owned(), "efi".to_owned());
                 }
             }
             if let Some(features) = xml.get_mut_child("features") {
@@ -1144,9 +1201,7 @@ impl VMess {
         if overrides.destroy_on_reboot {
             let _ = xml.take_child("on_reboot");
 
-            let new_elem = format!(
-                r#"<on_reboot>destroy</on_reboot>"#,
-            );
+            let new_elem = format!(r#"<on_reboot>destroy</on_reboot>"#,);
             let elem = Element::parse(new_elem.as_bytes())?;
             xml.children.push(XMLNode::Element(elem));
         }
@@ -1458,7 +1513,8 @@ impl VMess {
                 std::fs::create_dir_all(&self.config.tmp_path)?;
                 &self.config.tmp_path
             }
-        }.join(&new_base_name);
+        }
+        .join(&new_base_name);
 
         let new_name_in_pool = &self.config.pool_path.join(&new_base_name);
         let new_name_in_pool_disp = new_name_in_pool.display();
@@ -1467,9 +1523,8 @@ impl VMess {
         let new_disp = new.display();
         if params.temp || params.pool.is_some() {
             let _ = std::fs::remove_file(&new_adv);
-            std::os::unix::fs::symlink(&new, &new_adv).with_context(
-                || format!("symlink {} creation", new_adv.display())
-            )?;
+            std::os::unix::fs::symlink(&new, &new_adv)
+                .with_context(|| format!("symlink {} creation", new_adv.display()))?;
         }
 
         let pool_path = &self.config.pool_path;
@@ -1532,13 +1587,11 @@ impl VMess {
         Ok(())
     }
 
-    fn new_image(&self, params: New)  -> Result<(), Error> {
+    fn new_image(&self, params: New) -> Result<(), Error> {
         let pool = self.get_pool()?;
         let name = &params.name;
 
-        let new_base_name = {
-            PathBuf::from(format!("{name}.qcow2"))
-        };
+        let new_base_name = { PathBuf::from(format!("{name}.qcow2")) };
 
         if let Ok(_) = pool.get_by_name(&name) {
             return Err(Error::AlreadyExists);
@@ -1548,7 +1601,8 @@ impl VMess {
             &self.config.pool_path
         } else {
             &self.config.tmp_path
-        }.join(&new_base_name);
+        }
+        .join(&new_base_name);
 
         let _ = std::fs::remove_file(&new);
         let new_disp = new.display();
@@ -1622,8 +1676,8 @@ impl VMess {
                 "virsh list --state-shutoff --name | grep -E '^{vmname_prefix}{vm.name}$'"
             ) {
                 if let Err(_) = ibash_stdout!(
-                        "virsh list --name | grep -E '^{vmname_prefix}{vmname}$'",
-                        vmname = vm.name
+                    "virsh list --name | grep -E '^{vmname_prefix}{vmname}$'",
+                    vmname = vm.name
                 ) {
                     // Volatile VMs disappear
                     break;
@@ -1679,16 +1733,12 @@ impl VMess {
                 let old_link_path = self.config.pool_path.join(existing);
                 std::fs::rename(&image_path, &new_adv).map_err(|e| {
                     Error::Context(
-                        format!("rename: {} -> {}",
-                            image_path.display(), new_adv.display()),
-                            Box::new(e),
+                        format!("rename: {} -> {}", image_path.display(), new_adv.display()),
+                        Box::new(e),
                     )
                 })?;
                 std::fs::remove_file(&old_link_path).map_err(|e| {
-                    Error::Context(
-                        format!("remove {}", old_link_path.display()),
-                        Box::new(e),
-                    )
+                    Error::Context(format!("remove {}", old_link_path.display()), Box::new(e))
                 })?;
                 let _ = std::fs::remove_file(&new_link_path);
                 std::os::unix::fs::symlink(&new_adv, &new_link_path).map_err(|e| {
@@ -1702,8 +1752,7 @@ impl VMess {
                 let image_path = self.config.pool_path.join(existing);
                 std::fs::rename(&image_path, &new_adv).map_err(|e| {
                     Error::Context(
-                        format!("rename: {} -> {}",
-                            image_path.display(), new_adv.display()),
+                        format!("rename: {} -> {}", image_path.display(), new_adv.display()),
                         Box::new(e),
                     )
                 })?;
@@ -1780,7 +1829,8 @@ impl VMess {
                         closure,
                         image,
                         &snapshot,
-                        format!("{}.{}", name_path, key))?;
+                        format!("{}.{}", name_path, key),
+                    )?;
                 }
 
                 let vm = if let Some(name) = &snapshot.vm_using {
@@ -1806,9 +1856,14 @@ impl VMess {
                         return Err(Error::CurrentlyDefined);
                     }
 
-                    info!("Stopping VM for {}{}", name_path,
-                        vm.attrs.get("State").map(|s| format!(", state: {s}"))
-                        .unwrap_or("".to_owned()));
+                    info!(
+                        "Stopping VM for {}{}",
+                        name_path,
+                        vm.attrs
+                            .get("State")
+                            .map(|s| format!(", state: {s}"))
+                            .unwrap_or("".to_owned())
+                    );
 
                     let vmname_prefix = self.get_vm_prefix();
                     match vm.attrs.get("State").as_ref().map(|x| x.as_str()) {
@@ -1932,12 +1987,16 @@ impl VMess {
                     }
                 } else {
                     None
-                }.unwrap_or("user");
+                }
+                .unwrap_or("user");
 
-                host_config.insert(short_vmname.to_owned(), HostEntry {
-                    hostname: Some(address.trim().to_owned()),
-                    user: Some(username.to_owned()),
-                });
+                host_config.insert(
+                    short_vmname.to_owned(),
+                    HostEntry {
+                        hostname: Some(address.trim().to_owned()),
+                        user: Some(username.to_owned()),
+                    },
+                );
             }
         }
 
@@ -1949,11 +2008,7 @@ impl VMess {
             if let Some(hostname) = &entry.hostname {
                 writeln!(&mut config, r#"Hostname {}"#, hostname)?;
             }
-            writeln!(
-                &mut config,
-                "IdentityFile {}\n\n",
-                ssh_config.identity_file
-            )?;
+            writeln!(&mut config, "IdentityFile {}\n\n", ssh_config.identity_file)?;
         }
 
         if ssh_config.config_file.exists() {
@@ -2004,8 +2059,8 @@ impl VMess {
         files_to_domains: &mut HashMap<PathBuf, String>,
         short_vmname: &str,
         vmname: &str,
-        pool: &mut Pool) -> Result<(), Error>
-    {
+        pool: &mut Pool,
+    ) -> Result<(), Error> {
         lazy_static! {
             static ref SOURCE_FILE: Regex = Regex::new(r"^[\t ]+[^ ]+[\t ]+([^']+)$").unwrap();
             static ref DOM_PROP: Regex = Regex::new(r"^([^:]+):[ \t]*([^ \t]+.*)$").unwrap();
@@ -2034,7 +2089,8 @@ impl VMess {
 }
 
 fn read_json_path<T>(json_path: impl AsRef<Path>) -> Result<T, Error>
-    where T: for<'a> Deserialize<'a>
+where
+    T: for<'a> Deserialize<'a>,
 {
     let mut file = std::fs::File::open(json_path.as_ref())?;
     let mut contents = String::new();
@@ -2043,7 +2099,9 @@ fn read_json_path<T>(json_path: impl AsRef<Path>) -> Result<T, Error>
 }
 
 pub fn get_vm_image_path(image: impl AsRef<str>) -> Result<PathBuf, Error> {
-    let vm = CommandMode::Exists(Exists { name: image.as_ref().to_owned() });
+    let vm = CommandMode::Exists(Exists {
+        name: image.as_ref().to_owned(),
+    });
     let opt = CommandArgs {
         config: None,
         command: vm,

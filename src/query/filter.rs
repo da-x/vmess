@@ -24,7 +24,7 @@ pub struct MatchInfo<'a> {
 impl Expr {
     pub fn parse_cmd(expr: &[String]) -> Result<Self, Error> {
         if expr.len() == 0 {
-            return Ok(Expr::All)
+            return Ok(Expr::All);
         }
 
         let owner = expr.join(" ");
@@ -47,7 +47,7 @@ impl Expr {
         match self {
             Expr::Substring(substr) => {
                 return info.name.contains(substr);
-            },
+            }
             Expr::State(state) => {
                 return info.vm_state == Some(*state);
             }

@@ -59,7 +59,9 @@ pub(crate) fn calculate_hash<T: Hash>(t: &T) -> u64 {
 }
 
 pub(crate) fn is_version_at_least(version_str: &str, min_version: &[u32]) -> bool {
-    let version_numbers: Vec<u32> = version_str.trim().split('.')
+    let version_numbers: Vec<u32> = version_str
+        .trim()
+        .split('.')
         .map(|s| s.parse::<u32>().unwrap())
         .collect();
 
