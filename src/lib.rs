@@ -609,7 +609,7 @@ impl Image {
 
     fn new(
         root_path: &PathBuf,
-        path: PathBuf,
+        path: &PathBuf,
         files_to_domains: &HashMap<PathBuf, String>,
     ) -> Result<Self, Error> {
         let abs_path = Self::get_filename(root_path, &path);
@@ -623,7 +623,7 @@ impl Image {
             vm_using: files_to_domains.get(&abs_path).map(|x| (*x).to_owned()),
             size_mb: (std::fs::metadata(&abs_path)?.blocks() * 512) / (1024 * 1024),
             vm_info: Default::default(),
-            rel_path: path,
+            rel_path: path.clone(),
             frozen: is_frozen,
         })
     }
@@ -880,13 +880,11 @@ impl VMess {
 
             let mut current_image = &mut pool.images;
             for layer in chain_info.chain.iter().rev() {
-                let current_rel_file = layer.basename.clone();
                 let current_name_raw = layer.basename.file_stem().unwrap().to_string_lossy();
                 let current_name_full = current_name_raw.to_string();
                 let json_base = &current_name_full;
-                let json_path = self
-                    .config
-                    .pool_path
+                let json_path = layer
+                    .real_location
                     .join(PathBuf::from(format!("{}.json", json_base)));
                 if json_path.exists() {
                     current_vm_info.merge(&read_json_path(&json_path).with_context(|| {
@@ -901,7 +899,7 @@ impl VMess {
                 let ret = match current_image.images.entry(key.to_owned()) {
                     btree_map::Entry::Vacant(v) => {
                         let mut image =
-                            Image::new(&pool_path, current_rel_file.clone(), &files_to_domains)
+                            Image::new(&layer.real_location, &layer.basename, &files_to_domains)
                                 .with_context(|| {
                                     format!(
                                         "during image resolve of path {}",
