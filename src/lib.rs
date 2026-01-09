@@ -1115,14 +1115,19 @@ impl VMess {
             );
         }
 
-        for (key, image) in pool.images.iter() {
-            by_image(
+        for snapshot in pool.get_all_snapshots() {
+            // Generate display name for this snapshot (remove .qcow2 extension)
+            let snapshot_stem = snapshot.rel_path.file_stem().unwrap().to_string_lossy();
+            let snapshot_name = strip_frozen_suffix(&snapshot_stem).replace('%', ".");
+
+            by_snapshot(
                 &columns,
                 &self.config,
                 &mut table,
                 &pool,
-                &image,
-                strip_frozen_suffix(key).replace('%', "."), // Strip frozen suffix and replace % with . for display
+                snapshot, // image parameter - not used anymore
+                snapshot,
+                snapshot_name,
                 &filter_expr,
             );
         }
