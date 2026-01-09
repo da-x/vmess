@@ -537,6 +537,7 @@ impl ImageCollection {
 #[derive(Debug)]
 struct Image {
     rel_path: PathBuf,
+    pool_directory: PathBuf,
     vm_info: VMInfo,
     size_mb: u64,
     vm_using: Option<String>,
@@ -608,11 +609,11 @@ impl Image {
     }
 
     fn new(
-        root_path: &PathBuf,
+        pool_directory: &PathBuf,
         path: &PathBuf,
         files_to_domains: &HashMap<PathBuf, String>,
     ) -> Result<Self, Error> {
-        let abs_path = Self::get_filename(root_path, &path);
+        let abs_path = Self::get_filename(pool_directory, &path);
 
         // Check if this is a frozen image based on filename
         let filename = path.file_stem().unwrap_or_default().to_string_lossy();
@@ -624,8 +625,30 @@ impl Image {
             size_mb: (std::fs::metadata(&abs_path)?.blocks() * 512) / (1024 * 1024),
             vm_info: Default::default(),
             rel_path: path.clone(),
+            pool_directory: pool_directory.clone(),
             frozen: is_frozen,
         })
+    }
+
+    fn get_pool_name(&self, config: &Config) -> String {
+        if self.pool_directory == config.pool_path {
+            "main".to_string()
+        } else if self.pool_directory == config.tmp_path {
+            "tmp".to_string()
+        } else {
+            // Check named pools
+            for pool in &config.pools {
+                if self.pool_directory == pool.path {
+                    return pool.name.clone();
+                }
+            }
+            // Fallback to directory name if not found
+            self.pool_directory
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string()
+        }
     }
 }
 
@@ -935,7 +958,7 @@ impl VMess {
         #[derive(Serialize, Deserialize, Hash, Eq, PartialEq, Debug, EnumIter)]
         enum Column {
             Name,
-            Volatile,
+            Pool,
             State,
             MemUsage,
             DiskUsage,
@@ -960,7 +983,7 @@ impl VMess {
             }
             None => {
                 columns.insert(Column::Name);
-                columns.insert(Column::Volatile);
+                columns.insert(Column::Pool);
                 columns.insert(Column::State);
                 columns.insert(Column::MemUsage);
                 columns.insert(Column::DiskUsage);
@@ -985,26 +1008,11 @@ impl VMess {
             path: String,
             filter_expr: &query::Expr,
         ) {
-            let abs_image = config.pool_path.join(&image.rel_path);
-            let tmp = if let Ok(link) = std::fs::read_link(abs_image) {
-                if link.starts_with(&config.tmp_path) {
-                    "Y"
-                } else {
-                    ""
-                }
-            } else {
-                ""
-            };
+            let pool_name = image.get_pool_name(config);
 
-            let (vm_state, volatile, mem_size) = if let Some(vm_using) = &image.vm_using {
+            let (vm_state, mem_size) = if let Some(vm_using) = &image.vm_using {
                 if let Some(vm) = pool.vms.get(vm_using) {
                     let state = vm.attrs.get("State").map(|x| x.as_str()).unwrap_or("");
-                    let vol =
-                        if vm.attrs.get("Persistent").map(|x| x.as_str()).unwrap_or("") == "no" {
-                            "y"
-                        } else {
-                            tmp
-                        };
 
                     let mem_size = if state == "running" {
                         vm.attrs
@@ -1026,12 +1034,12 @@ impl VMess {
                     } else {
                         Cow::from("")
                     };
-                    (state, vol, mem_size)
+                    (state, mem_size)
                 } else {
-                    ("", tmp, Cow::from(""))
+                    ("", Cow::from(""))
                 }
             } else {
-                ("", tmp, Cow::from(""))
+                ("", Cow::from(""))
             };
 
             let disk_size = format!("{:.2} GB", image.size_mb as f32 / 1024.0);
@@ -1039,11 +1047,11 @@ impl VMess {
             let mut row = Row::empty();
             for column in columns {
                 let s = match column {
-                    Column::Name => &path,
-                    Column::Volatile => volatile,
-                    Column::State => &vm_state,
-                    Column::MemUsage => &mem_size,
-                    Column::DiskUsage => &disk_size,
+                    Column::Name => path.as_str(),
+                    Column::Pool => pool_name.as_str(),
+                    Column::State => vm_state,
+                    Column::MemUsage => mem_size.as_ref(),
+                    Column::DiskUsage => disk_size.as_str(),
                 };
                 row.add_cell(Cell::new(s));
             }
