@@ -2,6 +2,18 @@ use structopt::StructOpt;
 use thiserror::Error;
 use vmess::{CommandArgs, VMess};
 
+#[derive(StructOpt, Debug)]
+struct Args {
+    #[structopt(flatten)]
+    command_args: CommandArgs,
+
+    #[structopt(long, short = "v", help = "Verbose logging (debug level)")]
+    verbose: bool,
+
+    #[structopt(long, short = "q", help = "Quiet logging (error level only)")]
+    quiet: bool,
+}
+
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("VMess: {0}")]
@@ -11,7 +23,7 @@ pub enum Error {
     LogSet(#[from] log::SetLoggerError),
 }
 
-fn init_log() -> Result<(), Error> {
+fn init_log(level: log::LevelFilter) -> Result<(), Error> {
     use fern::colors::{Color, ColoredLevelConfig};
 
     let colors_level = ColoredLevelConfig::new()
@@ -32,7 +44,7 @@ fn init_log() -> Result<(), Error> {
                 message
             ))
         })
-        .level(log::LevelFilter::Info)
+        .level(level)
         .level_for("ops", log::LevelFilter::Debug)
         .chain(std::io::stdout())
         .apply()?;
@@ -41,11 +53,19 @@ fn init_log() -> Result<(), Error> {
 }
 
 fn main_wrap() -> Result<(), Error> {
-    let opt = CommandArgs::from_args();
+    let args = Args::from_args();
 
-    init_log()?;
+    let log_level = if args.verbose {
+        log::LevelFilter::Debug
+    } else if args.quiet {
+        log::LevelFilter::Error
+    } else {
+        log::LevelFilter::Info
+    };
 
-    match VMess::command(&opt) {
+    init_log(log_level)?;
+
+    match VMess::command(&args.command_args) {
         Err(err) => return Err(err.into()),
         Ok(mut vmess) => {
             vmess.run()?;
