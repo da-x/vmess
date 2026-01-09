@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use super::Error;
 use log::debug;
 use regex::Regex;
+use serde::Deserialize;
 
 lazy_static::lazy_static! {
     static ref FROZEN_SUFFIX: Regex = Regex::new(r"@@[a-f0-9]+$").unwrap();
@@ -300,4 +301,14 @@ pub(crate) fn write_qcow2_backing_file(
 
     file.sync_all()?;
     Ok(())
+}
+
+pub(crate) fn read_json_path<T>(json_path: impl AsRef<Path>) -> Result<T, Error>
+where
+    T: for<'a> Deserialize<'a>,
+{
+    let mut file = std::fs::File::open(json_path.as_ref())?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    Ok(serde_json::de::from_str(&contents)?)
 }

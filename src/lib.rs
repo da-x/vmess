@@ -30,8 +30,15 @@ mod utils;
 #[allow(unused_parens)]
 mod query;
 
+use crate::utils::adjust_path_by_env;
+use crate::utils::calculate_hash;
+use crate::utils::get_qcow2_backing_chain;
+use crate::utils::is_frozen_snapshot;
+use crate::utils::is_version_at_least;
+use crate::utils::read_json_path;
+use crate::utils::strip_frozen_suffix;
+use crate::utils::AddExtension;
 use fstrings::*;
-use utils::*;
 
 use crate::query::{MatchInfo, VMState};
 
@@ -488,7 +495,6 @@ impl SnapshotCollection {
 
         result
     }
-
 }
 
 #[derive(Debug)]
@@ -2131,16 +2137,6 @@ impl VMess {
         pool.vms.insert(short_vmname.to_owned(), vm);
         Ok(())
     }
-}
-
-fn read_json_path<T>(json_path: impl AsRef<Path>) -> Result<T, Error>
-where
-    T: for<'a> Deserialize<'a>,
-{
-    let mut file = std::fs::File::open(json_path.as_ref())?;
-    let mut contents = String::new();
-    file.read_to_string(&mut contents)?;
-    Ok(serde_json::de::from_str(&contents)?)
 }
 
 pub fn get_vm_image_path(image: impl AsRef<str>) -> Result<PathBuf, Error> {
