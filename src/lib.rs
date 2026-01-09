@@ -488,6 +488,7 @@ impl SnapshotCollection {
 
         result
     }
+
 }
 
 #[derive(Debug)]
@@ -1864,7 +1865,8 @@ impl VMess {
     fn kill(&mut self, params: Kill) -> Result<(), Error> {
         let pool = self.get_pool()?;
 
-        let check_match = &|s: &str| -> Result<bool, Error> {
+        // Create a matcher function that handles both regex and exact match
+        let matcher = |s: &str| -> Result<bool, Error> {
             if params.regex {
                 for name in params.names.iter() {
                     let regex = Regex::new(name)?;
@@ -1879,85 +1881,66 @@ impl VMess {
                     }
                 }
             }
-
             Ok(false)
         };
 
-        struct Closure<'a> {
-            by_snapshot: &'a dyn Fn(&Closure, &Snapshot, &Snapshot, String) -> Result<(), Error>,
-            by_name: &'a dyn Fn(&Closure, &Snapshot, String) -> Result<(), Error>,
-        }
+        // Get all snapshots and process them
+        for snapshot in pool.get_all_snapshots() {
+            // Generate display name for this snapshot
+            let snapshot_path_str = snapshot.rel_path.to_string_lossy();
+            let snapshot_name = strip_frozen_suffix(&snapshot_path_str).replace('%', ".");
 
-        let recursive = Closure {
-            by_snapshot: &|closure, image, snapshot, name_path| {
-                for (key, snapshot) in snapshot.sub.iter() {
-                    (closure.by_snapshot)(
-                        closure,
-                        image,
-                        &snapshot,
-                        format!("{}.{}", name_path, key),
-                    )?;
+            let vm = if let Some(name) = &snapshot.vm_using {
+                pool.vms.get(name)
+            } else {
+                None
+            };
+
+            if !matcher(&snapshot_name)? {
+                continue;
+            }
+
+            if params.dry_run {
+                println!("{}", snapshot_name);
+                continue;
+            }
+
+            info!("About to remove VM and image files for {}", snapshot_name);
+
+            let image_path = &snapshot.rel_path;
+            if let Some(vm) = &vm {
+                if !params.force {
+                    return Err(Error::CurrentlyDefined);
                 }
 
-                let vm = if let Some(name) = &snapshot.vm_using {
-                    pool.vms.get(name)
-                } else {
-                    None
-                };
+                info!(
+                    "Stopping VM for {}{}",
+                    snapshot_name,
+                    vm.attrs
+                        .get("State")
+                        .map(|s| format!(", state: {s}"))
+                        .unwrap_or("".to_owned())
+                );
 
-                if !check_match(name_path.as_str())? {
-                    return Ok(());
-                }
-
-                if params.dry_run {
-                    println!("{}", name_path);
-                    return Ok(());
-                }
-
-                info!("About to remove VM and image files for {}", name_path);
-
-                let image_path = &snapshot.rel_path;
-                if let Some(vm) = &vm {
-                    if !params.force {
-                        return Err(Error::CurrentlyDefined);
+                let vmname_prefix = self.get_vm_prefix();
+                match vm.attrs.get("State").as_ref().map(|x| x.as_str()) {
+                    Some("shut off") => {
+                        ibash_stdout!("virsh undefine --nvram {vmname_prefix}{vm.name}")?;
                     }
-
-                    info!(
-                        "Stopping VM for {}{}",
-                        name_path,
-                        vm.attrs
-                            .get("State")
-                            .map(|s| format!(", state: {s}"))
-                            .unwrap_or("".to_owned())
-                    );
-
-                    let vmname_prefix = self.get_vm_prefix();
-                    match vm.attrs.get("State").as_ref().map(|x| x.as_str()) {
-                        Some("shut off") => {
-                            ibash_stdout!("virsh undefine --nvram {vmname_prefix}{vm.name}")?;
-                        }
-                        _ => {
-                            ibash_stdout!("virsh destroy {vmname_prefix}{vm.name}")?;
-                        }
+                    _ => {
+                        ibash_stdout!("virsh destroy {vmname_prefix}{vm.name}")?;
                     }
                 }
+            }
 
-                info!("Remove image files for {}", name_path);
+            info!("Remove image files for {}", snapshot_name);
 
-                let pool_image_path = self.config.pool_path.join(&image_path);
-                std::fs::remove_file(&pool_image_path)?;
-                let tmp_image_path = self.config.tmp_path.join(&image_path);
-                if tmp_image_path.exists() {
-                    std::fs::remove_file(&tmp_image_path)?;
-                }
-
-                Ok(())
-            },
-            by_name: &|closure, image, path| (closure.by_snapshot)(closure, &image, &image, path),
-        };
-
-        for (key, image) in pool.images.iter() {
-            (recursive.by_name)(&recursive, &image, key.clone())?;
+            let pool_image_path = self.config.pool_path.join(&image_path);
+            std::fs::remove_file(&pool_image_path)?;
+            let tmp_image_path = self.config.tmp_path.join(&image_path);
+            if tmp_image_path.exists() {
+                std::fs::remove_file(&tmp_image_path)?;
+            }
         }
 
         Ok(())
