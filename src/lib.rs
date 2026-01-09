@@ -619,9 +619,11 @@ impl Image {
         let filename = path.file_stem().unwrap_or_default().to_string_lossy();
         let is_frozen = is_frozen_image(&filename);
 
+        let vm_using = files_to_domains.get(&abs_path).map(|x| (*x).to_owned());
+        
         Ok(Image {
             sub: Default::default(),
-            vm_using: files_to_domains.get(&abs_path).map(|x| (*x).to_owned()),
+            vm_using,
             size_mb: (std::fs::metadata(&abs_path)?.blocks() * 512) / (1024 * 1024),
             vm_info: Default::default(),
             rel_path: path.clone(),
@@ -2283,7 +2285,15 @@ impl VMess {
         for line in ibash_stdout!("virsh domblklist {vmname}")?.lines() {
             if let Some(cap) = SOURCE_FILE.captures(&line) {
                 let s = cap.get(1).unwrap().as_str();
-                files_to_domains.insert(PathBuf::from(s), short_vmname.to_owned());
+                let path = PathBuf::from(s);
+                files_to_domains.insert(path.clone(), short_vmname.to_owned());
+                
+                // If this is a symlink, also add the target path
+                if let Ok(target) = std::fs::canonicalize(&path) {
+                    if target != path {
+                        files_to_domains.insert(target, short_vmname.to_owned());
+                    }
+                }
             }
         }
         let mut vm = VM {
