@@ -7,12 +7,7 @@ use std::path::{Path, PathBuf};
 
 use super::Error;
 use log::debug;
-use regex::Regex;
 use serde::Deserialize;
-
-lazy_static::lazy_static! {
-    static ref FROZEN_SUFFIX: Regex = Regex::new(r"@@[a-f0-9]+$").unwrap();
-}
 
 #[derive(Debug)]
 pub(crate) struct BackingChainInfo {
@@ -280,14 +275,6 @@ pub(crate) fn get_qcow2_backing_chain(
     }
 
     Ok(BackingChainInfo { chain })
-}
-
-pub(crate) fn is_frozen_snapshot(filename: &str) -> bool {
-    FROZEN_SUFFIX.is_match(filename)
-}
-
-pub(crate) fn strip_frozen_suffix(filename: &str) -> String {
-    FROZEN_SUFFIX.replace(filename, "").to_string()
 }
 
 pub(crate) fn write_qcow2_backing_file(

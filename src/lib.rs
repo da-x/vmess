@@ -33,10 +33,8 @@ mod query;
 use crate::utils::adjust_path_by_env;
 use crate::utils::calculate_hash;
 use crate::utils::get_qcow2_backing_chain;
-use crate::utils::is_frozen_snapshot;
 use crate::utils::is_version_at_least;
 use crate::utils::read_json_path;
-use crate::utils::strip_frozen_suffix;
 use crate::utils::AddExtension;
 use fstrings::*;
 
@@ -333,6 +331,12 @@ pub struct List {
 }
 
 #[derive(Debug, StructOpt, Clone)]
+pub struct Tree {
+    #[structopt(name = "filter")]
+    pub filter: Vec<String>,
+}
+
+#[derive(Debug, StructOpt, Clone)]
 pub enum CommandMode {
     New(New),
 
@@ -372,6 +376,9 @@ pub enum CommandMode {
 
     /// List image files and VMs
     List(List),
+
+    /// Show tree structure of VM images and snapshots
+    Tree(Tree),
 
     /// Update SSH config based on DHCP of client VMs
     UpdateSsh(UpdateSshParams),
@@ -437,6 +444,23 @@ pub struct SSHConfig {
 pub struct VMess {
     config: Config,
     command: Option<CommandMode>,
+}
+
+lazy_static::lazy_static! {
+    static ref FROZEN_SUFFIX: Regex = Regex::new(r"@@[a-f0-9]+$").unwrap();
+    static ref PARSE_QCOW2: Regex = Regex::new("[.]qcow2$").unwrap();
+}
+
+pub(crate) fn is_frozen_snapshot(filename: &str) -> bool {
+    FROZEN_SUFFIX.is_match(filename)
+}
+
+pub(crate) fn strip_frozen_suffix(filename: &str) -> String {
+    FROZEN_SUFFIX.replace(filename, "").to_string()
+}
+
+pub(crate) fn strip_qcow2_suffix(filename: &str) -> String {
+    PARSE_QCOW2.replace(filename, "").to_string()
 }
 
 #[derive(Debug, Default)]
@@ -505,11 +529,6 @@ struct Snapshot {
     vm_using: Option<String>,
     sub: SnapshotCollection,
     frozen: bool,
-}
-
-lazy_static! {
-    static ref PARSE_QCOW2: Regex = Regex::new("^([^%]+)([%]([^.]*))?[.]qcow2?$").unwrap();
-    static ref FROZEN_SUFFIX: Regex = Regex::new("@@[a-f0-9]+$").unwrap();
 }
 
 impl VMInfo {
@@ -682,6 +701,9 @@ impl VMess {
         match command {
             CommandMode::List(params) => {
                 self.list(params)?;
+            }
+            CommandMode::Tree(params) => {
+                self.tree(params)?;
             }
             CommandMode::Fork(params) => {
                 self.fork(params)?;
@@ -856,11 +878,11 @@ impl VMess {
                     })?);
                 }
 
+                let key = layer.basename.to_string_lossy().into_owned();
+                let key = strip_qcow2_suffix(&key);
+
                 // Create or update the snapshot
-                let ret = match current_snapshot
-                    .snapshots
-                    .entry(layer.basename.to_string_lossy().into_owned())
-                {
+                let ret = match current_snapshot.snapshots.entry(key.to_owned()) {
                     btree_map::Entry::Vacant(v) => {
                         let mut snapshot =
                             Snapshot::new(&pool_path, current_rel_file.clone(), &files_to_domains)
@@ -1069,6 +1091,96 @@ impl VMess {
         }
 
         table.print_tty(false)?;
+
+        Ok(())
+    }
+
+    fn tree(&mut self, params: Tree) -> Result<(), Error> {
+        let pool = self
+            .get_pool()
+            .with_context(|| format!("during get_pool"))?;
+
+        let filter_expr =
+            query::Expr::parse_cmd(&params.filter).with_context(|| format!("during parse cmd"))?;
+
+        fn print_snapshot_tree(
+            snapshot_collection: &SnapshotCollection,
+            pool: &Pool,
+            config: &Config,
+            filter_expr: &query::Expr,
+            prefix: &str,
+            _is_last: bool,
+        ) {
+            let snapshots: Vec<_> = snapshot_collection.iter().collect();
+
+            for (i, (_name, snapshot)) in snapshots.iter().enumerate() {
+                let is_last_item = i == snapshots.len() - 1;
+
+                // Generate display name for this snapshot
+                let snapshot_name = snapshot.rel_path.file_stem().unwrap().to_string_lossy();
+
+                // Check if this snapshot matches the filter
+                let (vm_state, vm_info) = if let Some(vm_using) = &snapshot.vm_using {
+                    if let Some(vm) = pool.vms.get(vm_using) {
+                        let state = vm.attrs.get("State").map(|x| x.as_str()).unwrap_or("");
+                        let vm_state = match state {
+                            "running" => Some(crate::query::VMState::Running),
+                            "shut off" => Some(crate::query::VMState::Stopped),
+                            _ => None,
+                        };
+                        (vm_state, format!(" ({})", state))
+                    } else {
+                        (None, String::new())
+                    }
+                } else {
+                    (None, String::new())
+                };
+
+                let mi = crate::query::MatchInfo {
+                    vm_state,
+                    name: &snapshot_name,
+                };
+
+                if filter_expr.match_info(&mi) {
+                    // Print tree structure symbols
+                    let current_prefix = if is_last_item {
+                        format!("{}└── ", prefix)
+                    } else {
+                        format!("{}├── ", prefix)
+                    };
+
+                    // Print snapshot info
+                    let frozen_indicator = if snapshot.frozen { " [FROZEN]" } else { "" };
+                    let disk_size = format!("{:.2} GB", snapshot.size_mb as f32 / 1024.0);
+
+                    println!(
+                        "{}{} ({}){}{}",
+                        current_prefix, snapshot_name, disk_size, vm_info, frozen_indicator
+                    );
+                }
+
+                // Recursively print sub-snapshots
+                if !snapshot.sub.is_empty() {
+                    let next_prefix = if is_last_item {
+                        format!("{}    ", prefix)
+                    } else {
+                        format!("{}│   ", prefix)
+                    };
+
+                    print_snapshot_tree(
+                        &snapshot.sub,
+                        pool,
+                        config,
+                        filter_expr,
+                        &next_prefix,
+                        true,
+                    );
+                }
+            }
+        }
+
+        println!("VM Image Tree:");
+        print_snapshot_tree(&pool.images, &pool, &self.config, &filter_expr, "", true);
 
         Ok(())
     }
