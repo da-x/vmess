@@ -337,6 +337,16 @@ pub struct Tree {
 }
 
 #[derive(Debug, StructOpt, Clone)]
+pub struct Freeze {
+    /// Full name of the domain
+    pub name: String,
+
+    /// Force freezing behavior
+    #[structopt(long = "force")]
+    pub force: Option<String>,
+}
+
+#[derive(Debug, StructOpt, Clone)]
 pub enum CommandMode {
     New(New),
 
@@ -379,6 +389,9 @@ pub enum CommandMode {
 
     /// Show tree structure of VM images and images
     Tree(Tree),
+
+    /// Freeze a VM image by adding SHA256 hash to filename
+    Freeze(Freeze),
 
     /// Update SSH config based on DHCP of client VMs
     UpdateSsh(UpdateSshParams),
@@ -704,6 +717,9 @@ impl VMess {
             }
             CommandMode::Tree(params) => {
                 self.tree(params)?;
+            }
+            CommandMode::Freeze(params) => {
+                self.freeze(params)?;
             }
             CommandMode::Fork(params) => {
                 self.fork(params)?;
@@ -1152,6 +1168,120 @@ impl VMess {
         println!("VM Image Tree:");
         print_image_tree(&pool.images, &pool, &self.config, &filter_expr, "", true);
 
+        Ok(())
+    }
+
+    fn freeze(&mut self, params: Freeze) -> Result<(), Error> {
+        use sha2::{Sha256, Digest};
+        use std::io::Read;
+
+        let pool = self
+            .get_pool()
+            .with_context(|| format!("during get_pool"))?;
+
+        let existing = pool.get_by_name(&params.name)?;
+        
+        // Check if already frozen
+        if existing.snap.frozen {
+            info!("Image {} is already frozen", params.name);
+            return Ok(());
+        }
+
+        // Check if there are subimages
+        if !existing.snap.sub.is_empty() {
+            return Err(Error::HasSubImages(params.name.clone(), "freeze"));
+        }
+
+        let vm_is_running = if let Some(vm) = &existing.vm {
+            let state = vm.attrs.get("State").map(|x| x.as_str()).unwrap_or("");
+            state == "running"
+        } else {
+            false
+        };
+
+        // Handle force options and VM state
+        if vm_is_running {
+            match params.force.as_deref() {
+                Some("stop") => {
+                    info!("Stopping VM {} before freeze", params.name);
+                    self.stop(Stop { name: params.name.clone() })?;
+                }
+                Some("while-running") => {
+                    info!("Freezing while VM {} is running", params.name);
+                    // Continue with freeze process
+                }
+                None => {
+                    return Err(Error::FreeText(format!(
+                        "Cannot freeze {} - VM is running. Use --force=stop or --force=while-running",
+                        params.name
+                    )));
+                }
+                Some(other) => {
+                    return Err(Error::FreeText(format!(
+                        "Invalid force option '{}'. Use 'stop' or 'while-running'",
+                        other
+                    )));
+                }
+            }
+        }
+
+        let image_path = self.config.pool_path.join(&existing.snap.rel_path);
+        let image_name_stem = existing.snap.rel_path.file_stem().unwrap().to_string_lossy();
+        
+        // Calculate SHA256 hash
+        let hash_hex = if vm_is_running && params.force.as_deref() == Some("while-running") {
+            // Copy image to temporary file first
+            let temp_path = self.config.pool_path.join(format!(".tmp-freeze.{}.qcow2.tmp", image_name_stem));
+            info!("Creating temporary copy for running VM");
+            
+            std::fs::copy(&image_path, &temp_path)
+                .with_context(|| format!("Failed to copy image to temp file"))?;
+            
+            // Calculate hash of the temporary copy
+            let mut file = std::fs::File::open(&temp_path)?;
+            let mut hasher = Sha256::new();
+            let mut buffer = [0; 8192];
+            loop {
+                let bytes_read = file.read(&mut buffer)?;
+                if bytes_read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..bytes_read]);
+            }
+            let hash = hasher.finalize();
+            let hash_hex = format!("{:x}", hash);
+            
+            // Remove temp file after hashing
+            std::fs::remove_file(&temp_path)?;
+            
+            hash_hex
+        } else {
+            // Calculate hash of the original file
+            let mut file = std::fs::File::open(&image_path)?;
+            let mut hasher = Sha256::new();
+            let mut buffer = [0; 8192];
+            loop {
+                let bytes_read = file.read(&mut buffer)?;
+                if bytes_read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..bytes_read]);
+            }
+            let hash = hasher.finalize();
+            format!("{:x}", hash)
+        };
+
+        // Create new frozen filename
+        let frozen_name = format!("{}@@{}.qcow2", image_name_stem, hash_hex);
+        let frozen_path = self.config.pool_path.join(&frozen_name);
+
+        info!("Freezing {} -> {}", params.name, frozen_name);
+        
+        // Rename the image file
+        std::fs::rename(&image_path, &frozen_path)
+            .with_context(|| format!("Failed to rename image to frozen filename"))?;
+
+        info!("Successfully frozen image {} with hash {}", params.name, &hash_hex[..8]);
         Ok(())
     }
 
