@@ -836,7 +836,7 @@ impl VMess {
 
         for lookup_path in &lookup_paths {
             for entry in
-                std::fs::read_dir(&lookup_path).with_context(|| format!("during read dir"))?
+                std::fs::read_dir(&lookup_path).with_context(|| format!("reading directory {}", lookup_path.display()))?
             {
                 let entry = entry.with_context(|| format!("during entry resolve"))?;
                 let name = entry.file_name();
