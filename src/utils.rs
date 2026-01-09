@@ -133,6 +133,7 @@ pub(crate) fn get_qcow2_backing_chain(
     let mut current_path = qcow2_path.to_path_buf();
     let mut locations_map = HashMap::new();
 
+    println!("//");
     loop {
         // Check if we've seen this path before (loop detection)
         if chain.contains(&current_path) {
@@ -160,21 +161,22 @@ pub(crate) fn get_qcow2_backing_chain(
 
         for lookup_path in lookup_paths {
             let candidate_path = lookup_path.join(&relative_path);
+            if !candidate_path.exists() {
+                continue;
+            }
 
-            if candidate_path.exists() {
-                // Check if it's a real file, not a symlink
-                if let Ok(symlink_metadata) = std::fs::symlink_metadata(&candidate_path) {
-                    if symlink_metadata.file_type().is_file()
-                        && !symlink_metadata.file_type().is_symlink()
-                    {
-                        file_locations.push(lookup_path.clone());
-                    }
+            // Check if it's a real file, not a symlink
+            if let Ok(symlink_metadata) = std::fs::symlink_metadata(&candidate_path) {
+                if !symlink_metadata.file_type().is_symlink() {
+                    file_locations.push(candidate_path);
                 }
             }
         }
 
         // Store locations for this file
         locations_map.insert(current_path.clone(), file_locations);
+
+        println!("---- {:#?}", locations_map);
 
         // Add current path to chain
         chain.push(current_path.clone());

@@ -853,7 +853,10 @@ impl VMess {
             let mut current_vm_info = VMInfo::default();
             let mut current_path: Vec<String> = vec![]; // Track path to current snapshot
 
+            println!("X");
             for (i, current_file) in chain_info.chain.iter().enumerate().rev() {
+                println!("  {:?}", (i, current_file));
+
                 // Convert to relative path within pool
                 let current_rel_file = match current_file.strip_prefix(&pool_path) {
                     Ok(rel_path) => rel_path.to_path_buf(),
