@@ -425,8 +425,8 @@ pub struct Config {
     pub multi_user: bool,
 
     #[serde(default)]
-    #[serde(rename = "shared-pools")]
-    pub shared_pools: Vec<NamedPoolPath>,
+    #[serde(rename = "pool")]
+    pub pools: Vec<NamedPoolPath>,
 
     #[serde(default)]
     #[serde(rename = "ssh-config")]
@@ -435,11 +435,11 @@ pub struct Config {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct NamedPoolPath {
-    #[serde(rename = "name")]
     pub name: String,
-
-    #[serde(rename = "path")]
     pub path: PathBuf,
+
+    #[serde(default)]
+    pub shared: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -677,23 +677,23 @@ impl VMess {
         )
         .unwrap();
 
-        let mut shared_pools = vec![];
-        for shared_pool in config.shared_pools {
+        let mut pools = vec![];
+        for pool in config.pools {
             let path = PathBuf::try_from(
-                shared_pool
-                    .path
+                pool.path
                     .into_os_string()
                     .into_string()
                     .unwrap()
                     .replace("$USER", &std::env::var("USER").expect("USER not defined")),
             )
             .unwrap();
-            shared_pools.push(NamedPoolPath {
+            pools.push(NamedPoolPath {
                 path,
-                name: shared_pool.name,
+                name: pool.name,
+                shared: pool.shared,
             })
         }
-        config.shared_pools = shared_pools;
+        config.pools = pools;
 
         Ok(Self { command, config })
     }
@@ -825,9 +825,9 @@ impl VMess {
 
         let pool_path = &self.config.pool_path;
 
-        // Collect all lookup paths: pool_path, tmp_path, and shared_pools
+        // Collect all lookup paths: pool_path, tmp_path, and pools
         let mut lookup_paths = vec![pool_path.clone(), self.config.tmp_path.clone()];
-        for shared_pool in &self.config.shared_pools {
+        for shared_pool in &self.config.pools {
             lookup_paths.push(shared_pool.path.clone());
         }
 
@@ -835,8 +835,8 @@ impl VMess {
         let mut backing_chains: Vec<_> = Vec::new();
 
         for lookup_path in &lookup_paths {
-            for entry in
-                std::fs::read_dir(&lookup_path).with_context(|| format!("reading directory {}", lookup_path.display()))?
+            for entry in std::fs::read_dir(&lookup_path)
+                .with_context(|| format!("reading directory {}", lookup_path.display()))?
             {
                 let entry = entry.with_context(|| format!("during entry resolve"))?;
                 let name = entry.file_name();
@@ -1172,7 +1172,7 @@ impl VMess {
     }
 
     fn freeze(&mut self, params: Freeze) -> Result<(), Error> {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         use std::io::Read;
 
         let pool = self
@@ -1180,7 +1180,7 @@ impl VMess {
             .with_context(|| format!("during get_pool"))?;
 
         let existing = pool.get_by_name(&params.name)?;
-        
+
         // Check if already frozen
         if existing.snap.frozen {
             info!("Image {} is already frozen", params.name);
@@ -1204,7 +1204,9 @@ impl VMess {
             match params.force.as_deref() {
                 Some("stop") => {
                     info!("Stopping VM {} before freeze", params.name);
-                    self.stop(Stop { name: params.name.clone() })?;
+                    self.stop(Stop {
+                        name: params.name.clone(),
+                    })?;
                 }
                 Some("while-running") => {
                     info!("Freezing while VM {} is running", params.name);
@@ -1226,17 +1228,25 @@ impl VMess {
         }
 
         let image_path = self.config.pool_path.join(&existing.snap.rel_path);
-        let image_name_stem = existing.snap.rel_path.file_stem().unwrap().to_string_lossy();
-        
+        let image_name_stem = existing
+            .snap
+            .rel_path
+            .file_stem()
+            .unwrap()
+            .to_string_lossy();
+
         // Calculate SHA256 hash
         let hash_hex = if vm_is_running && params.force.as_deref() == Some("while-running") {
             // Copy image to temporary file first
-            let temp_path = self.config.pool_path.join(format!(".tmp-freeze.{}.qcow2.tmp", image_name_stem));
+            let temp_path = self
+                .config
+                .pool_path
+                .join(format!(".tmp-freeze.{}.qcow2.tmp", image_name_stem));
             info!("Creating temporary copy for running VM");
-            
+
             std::fs::copy(&image_path, &temp_path)
                 .with_context(|| format!("Failed to copy image to temp file"))?;
-            
+
             // Calculate hash of the temporary copy
             let mut file = std::fs::File::open(&temp_path)?;
             let mut hasher = Sha256::new();
@@ -1250,10 +1260,10 @@ impl VMess {
             }
             let hash = hasher.finalize();
             let hash_hex = format!("{:x}", hash);
-            
+
             // Remove temp file after hashing
             std::fs::remove_file(&temp_path)?;
-            
+
             hash_hex
         } else {
             // Calculate hash of the original file
@@ -1276,12 +1286,16 @@ impl VMess {
         let frozen_path = self.config.pool_path.join(&frozen_name);
 
         info!("Freezing {} -> {}", params.name, frozen_name);
-        
+
         // Rename the image file
         std::fs::rename(&image_path, &frozen_path)
             .with_context(|| format!("Failed to rename image to frozen filename"))?;
 
-        info!("Successfully frozen image {} with hash {}", params.name, &hash_hex[..8]);
+        info!(
+            "Successfully frozen image {} with hash {}",
+            params.name,
+            &hash_hex[..8]
+        );
         Ok(())
     }
 
@@ -1737,7 +1751,7 @@ impl VMess {
 
         let new = 'x: {
             if let Some(pool_name) = &params.pool {
-                for pool in &self.config.shared_pools {
+                for pool in &self.config.pools {
                     if &pool.name == pool_name {
                         break 'x &pool.path;
                     }
