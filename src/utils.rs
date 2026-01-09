@@ -1,5 +1,4 @@
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
@@ -17,8 +16,14 @@ lazy_static::lazy_static! {
 
 #[derive(Debug)]
 pub(crate) struct BackingChainInfo {
-    pub chain: Vec<PathBuf>,
-    pub locations_map: HashMap<PathBuf, Vec<PathBuf>>, // Maps each file in chain to its real locations
+    // First layer is the image, second is backing for first, last layer is root.
+    pub chain: Vec<StoredLayer>,
+}
+
+#[derive(Debug)]
+pub(crate) struct StoredLayer {
+    pub basename: PathBuf,      // Just the filename, `ubuntu-18%nfsrdma.qcow2`.
+    pub real_location: PathBuf, // Directory in which the real filename is stored, i.e. not sylinks.
 }
 
 pub(crate) fn bash_stdout(cmd: String) -> Result<String, Error> {
@@ -125,22 +130,51 @@ pub(crate) fn read_qcow2_backing_file(qcow2_path: &Path) -> Result<Option<String
     Ok(Some(backing_file_name))
 }
 
+/// Starting from absolute qcow2_path which is under one of the lookup_paths (verify this!), we
+/// read the backing image, finding the exactly singular lookup_path that contains it as a real
+/// file and not a symlink. We do this until finding the root.
 pub(crate) fn get_qcow2_backing_chain(
     qcow2_path: &Path,
     lookup_paths: &[PathBuf],
 ) -> Result<BackingChainInfo, Error> {
     let mut chain = vec![];
     let mut current_path = qcow2_path.to_path_buf();
-    let mut locations_map = HashMap::new();
+    let mut visited_paths = std::collections::HashSet::new();
 
-    println!("//");
+    // Verify that the initial qcow2_path is under one of the lookup_paths
+    let initial_basename = current_path
+        .file_name()
+        .ok_or_else(|| Error::FreeText("Invalid qcow2 path - no filename".to_string()))?;
+
+    let mut initial_real_location = None;
+    for lookup_path in lookup_paths {
+        let candidate_path = lookup_path.join(&initial_basename);
+        if candidate_path == current_path {
+            // Verify it's a real file, not a symlink
+            if let Ok(symlink_metadata) = std::fs::symlink_metadata(&current_path) {
+                if !symlink_metadata.file_type().is_symlink() {
+                    initial_real_location = Some(lookup_path.clone());
+                    break;
+                }
+            }
+        }
+    }
+
+    initial_real_location.ok_or_else(|| {
+        Error::FreeText(format!(
+            "qcow2_path '{}' is not found as a real file under any lookup_path",
+            current_path.display()
+        ))
+    })?;
+
     loop {
         // Check if we've seen this path before (loop detection)
-        if chain.contains(&current_path) {
+        if visited_paths.contains(&current_path) {
             return Err(Error::FreeText(
                 "Loop detected in qcow2 backing chain".to_string(),
             ));
         }
+        visited_paths.insert(current_path.clone());
 
         // Check if current file exists
         if !current_path.exists() {
@@ -150,36 +184,47 @@ pub(crate) fn get_qcow2_backing_chain(
             )));
         }
 
-        // Find all locations where this file exists as a real file (not symlink)
-        let mut file_locations = Vec::new();
+        // Get basename and find the real location
+        let basename = current_path.file_name().ok_or_else(|| {
+            Error::FreeText(format!(
+                "Invalid path in backing chain - no filename: {}",
+                current_path.display()
+            ))
+        })?;
+        let basename = PathBuf::from(basename);
 
-        // Try to get relative path from the first lookup path
-        let relative_path = current_path
-            .file_name()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| current_path.clone());
-
+        // Find exactly one lookup_path that contains this file as a real file (not symlink)
+        let mut real_location = None;
         for lookup_path in lookup_paths {
-            let candidate_path = lookup_path.join(&relative_path);
-            if !candidate_path.exists() {
-                continue;
-            }
-
-            // Check if it's a real file, not a symlink
-            if let Ok(symlink_metadata) = std::fs::symlink_metadata(&candidate_path) {
-                if !symlink_metadata.file_type().is_symlink() {
-                    file_locations.push(candidate_path);
+            let candidate_path = lookup_path.join(&basename);
+            if candidate_path.exists() {
+                // Check if it's a real file, not a symlink
+                if let Ok(symlink_metadata) = std::fs::symlink_metadata(&candidate_path) {
+                    if !symlink_metadata.file_type().is_symlink() {
+                        if real_location.is_some() {
+                            return Err(Error::FreeText(format!(
+                                "Multiple real locations found for file '{}' - expected exactly one",
+                                basename.display()
+                            )));
+                        }
+                        real_location = Some(lookup_path.clone());
+                    }
                 }
             }
         }
 
-        // Store locations for this file
-        locations_map.insert(current_path.clone(), file_locations);
+        let real_location = real_location.ok_or_else(|| {
+            Error::FreeText(format!(
+                "No real location found for file '{}' in any lookup directory",
+                basename.display()
+            ))
+        })?;
 
-        println!("---- {:#?}", locations_map);
-
-        // Add current path to chain
-        chain.push(current_path.clone());
+        // Add to chain
+        chain.push(StoredLayer {
+            basename: basename.clone(),
+            real_location,
+        });
 
         // Read backing store from current file
         match read_qcow2_backing_file(&current_path)? {
@@ -195,7 +240,7 @@ pub(crate) fn get_qcow2_backing_chain(
                     )));
                 }
 
-                // Simple filename - search in all lookup directories
+                // Simple filename - search for exactly one real file in lookup directories
                 let mut found_backing_path = None;
                 for lookup_path in lookup_paths {
                     let candidate_path = lookup_path.join(&backing_name);
@@ -205,8 +250,13 @@ pub(crate) fn get_qcow2_backing_chain(
                             if symlink_metadata.file_type().is_file()
                                 && !symlink_metadata.file_type().is_symlink()
                             {
+                                if found_backing_path.is_some() {
+                                    return Err(Error::FreeText(format!(
+                                        "Multiple real locations found for backing file '{}' - expected exactly one",
+                                        backing_name
+                                    )));
+                                }
                                 found_backing_path = Some(candidate_path);
-                                break;
                             }
                         }
                     }
@@ -219,20 +269,17 @@ pub(crate) fn get_qcow2_backing_chain(
                     }
                     None => {
                         return Err(Error::FreeText(format!(
-                            "Cannot find backing file '{}' in any lookup directory",
+                            "Cannot find backing file '{}' as a real file in any lookup directory",
                             backing_name
                         )));
                     }
                 }
             }
-            None => break, // No backing file
+            None => break, // No backing file - reached root
         }
     }
 
-    Ok(BackingChainInfo {
-        chain,
-        locations_map,
-    })
+    Ok(BackingChainInfo { chain })
 }
 
 pub(crate) fn is_frozen_snapshot(filename: &str) -> bool {

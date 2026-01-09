@@ -505,7 +505,6 @@ struct Snapshot {
     vm_using: Option<String>,
     sub: SnapshotCollection,
     frozen: bool,
-    locations: Vec<PathBuf>,
 }
 
 lazy_static! {
@@ -546,18 +545,20 @@ impl<'a> GetInfo<'a> {
 
 impl Pool {
     fn get_by_name<'a>(&'a self, name: &str) -> Result<GetInfo<'a>, Error> {
-        if let Some(snapshot) = self.images.find_by_name(name) {
-            Ok(GetInfo {
-                snap: snapshot,
-                vm: if let Some(vm_name) = &snapshot.vm_using {
-                    self.vms.get(vm_name)
-                } else {
-                    None
-                },
-            })
-        } else {
-            Err(Error::NotFound(name.to_owned()))
+        for try_name in [name.to_owned(), name.replace(".", "%")] {
+            if let Some(snapshot) = self.images.find_by_name(&try_name) {
+                return Ok(GetInfo {
+                    snap: snapshot,
+                    vm: if let Some(vm_name) = &snapshot.vm_using {
+                        self.vms.get(vm_name)
+                    } else {
+                        None
+                    },
+                });
+            }
         }
+
+        return Err(Error::NotFound(name.to_owned()));
     }
 
     fn get_all_snapshots(&self) -> Vec<&Snapshot> {
@@ -578,20 +579,12 @@ impl Snapshot {
         root_path: &PathBuf,
         path: PathBuf,
         files_to_domains: &HashMap<PathBuf, String>,
-        file_locations: &std::collections::HashMap<PathBuf, Vec<PathBuf>>,
     ) -> Result<Self, Error> {
         let abs_path = Self::get_filename(root_path, &path);
 
         // Check if this is a frozen snapshot based on filename
         let filename = path.file_stem().unwrap_or_default().to_string_lossy();
         let is_frozen = is_frozen_snapshot(&filename);
-
-        // Get locations from the pre-computed map (try both relative and absolute paths)
-        let locations = file_locations
-            .get(&path)
-            .or_else(|| file_locations.get(&abs_path))
-            .cloned()
-            .unwrap_or_default();
 
         Ok(Snapshot {
             sub: Default::default(),
@@ -600,7 +593,6 @@ impl Snapshot {
             vm_info: Default::default(),
             rel_path: path,
             frozen: is_frozen,
-            locations,
         })
     }
 }
@@ -802,86 +794,58 @@ impl VMess {
         }
 
         // First, collect all qcow2 files and build backing chains
-        let mut backing_chains: Vec<(String, crate::utils::BackingChainInfo)> = Vec::new();
+        let mut backing_chains: Vec<_> = Vec::new();
 
-        for entry in
-            std::fs::read_dir(&self.config.pool_path).with_context(|| format!("during read dir"))?
-        {
-            let entry = entry.with_context(|| format!("during entry resolve"))?;
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
+        for lookup_path in &lookup_paths {
+            for entry in
+                std::fs::read_dir(&lookup_path).with_context(|| format!("during read dir"))?
+            {
+                let entry = entry.with_context(|| format!("during entry resolve"))?;
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
 
-            // Check if it's a qcow2 file
-            if name.ends_with(".qcow2") || name.ends_with(".qcow") {
-                // Get the backing chain for this file
-                match get_qcow2_backing_chain(&path, &lookup_paths) {
-                    Ok(chain_info) => {
-                        // Only include if the chain has files within the pool directory
-                        let has_pool_files = chain_info
-                            .chain
-                            .iter()
-                            .any(|abs_path| abs_path.strip_prefix(&pool_path).is_ok());
-
-                        if has_pool_files {
-                            // Extract basename from the original filename
-                            let basename = if let Some(stem) = Path::new(&*name).file_stem() {
-                                stem.to_string_lossy().to_string()
-                            } else {
-                                name.to_string()
-                            };
-                            backing_chains.push((basename, chain_info));
+                // Check if it's a qcow2 file
+                if name.ends_with(".qcow2") || name.ends_with(".qcow") {
+                    // Get the backing chain for this file
+                    match get_qcow2_backing_chain(&path, &lookup_paths) {
+                        Ok(chain_info) => {
+                            backing_chains.push(chain_info);
                         }
-                    }
-                    Err(_) => {
-                        // If we can't read the backing chain, skip this image entirely
+                        Err(_) => {
+                            // If we can't read the backing chain, skip this image entirely
+                        }
                     }
                 }
             }
         }
 
         // Now build the snapshot hierarchy based on actual backing relationships
-        for (base_name, chain_info) in backing_chains.iter() {
-            if chain_info.chain.is_empty() {
-                continue;
+        for chain_info in backing_chains.iter() {
+            // Build locations map from the new chain structure for compatibility
+            let mut locations_map: std::collections::HashMap<PathBuf, Vec<PathBuf>> =
+                std::collections::HashMap::new();
+            for layer in &chain_info.chain {
+                let abs_path = layer.real_location.join(&layer.basename);
+                locations_map.insert(layer.basename.clone(), vec![abs_path.clone()]);
+                locations_map.insert(
+                    abs_path.clone(),
+                    vec![layer.real_location.join(&layer.basename)],
+                );
             }
 
             // Process entire chain uniformly, from root (last) to leaf (first)
             let mut current_vm_info = VMInfo::default();
-            let mut current_path: Vec<String> = vec![]; // Track path to current snapshot
 
-            println!("X");
-            for (i, current_file) in chain_info.chain.iter().enumerate().rev() {
-                println!("  {:?}", (i, current_file));
-
-                // Convert to relative path within pool
-                let current_rel_file = match current_file.strip_prefix(&pool_path) {
-                    Ok(rel_path) => rel_path.to_path_buf(),
-                    Err(_) => continue, // Skip if not in pool directory
-                };
-
-                let current_name_raw = current_file.file_stem().unwrap().to_string_lossy();
-                let current_name_full = current_name_raw.to_string(); // Keep full name with frozen suffix
-
-                let (snapshot_name, is_root): (String, bool) = if i == chain_info.chain.len() - 1 {
-                    // This is the root image
-                    (base_name.clone(), true)
-                } else {
-                    // This is a snapshot - just replace % with .
-                    let snapshot_name = current_name_full.replace('%', ".");
-                    (snapshot_name, false)
-                };
-
-                // Load and merge JSON for this snapshot if it exists
-                // JSON files are right next to qcow2 files with same basename
-                let json_base = if is_root {
-                    base_name
-                } else {
-                    &current_name_full
-                };
+            let mut current_snapshot = &mut pool.images;
+            for layer in chain_info.chain.iter().rev() {
+                let current_rel_file = layer.basename.clone();
+                let current_name_raw = layer.basename.file_stem().unwrap().to_string_lossy();
+                let current_name_full = current_name_raw.to_string();
+                let json_base = &current_name_full;
                 let json_path = self
                     .config
                     .pool_path
@@ -892,64 +856,27 @@ impl VMess {
                     })?);
                 }
 
-                // Create or get the snapshot and update it
-                if is_root {
-                    // Root image goes into pool.images
-                    match pool.images.entry(snapshot_name.clone()) {
-                        btree_map::Entry::Vacant(v) => {
-                            let mut snapshot = Snapshot::new(
-                                &pool_path,
-                                current_rel_file.clone(),
-                                &files_to_domains,
-                                &chain_info.locations_map,
-                            )
-                            .with_context(|| {
-                                format!(
-                                    "during snapshot resolve of path {}",
-                                    current_file.display()
-                                )
-                            })?;
-                            snapshot.vm_info = current_vm_info.clone();
-                            v.insert(snapshot);
-                        }
-                        btree_map::Entry::Occupied(o) => {
-                            o.into_mut().vm_info = current_vm_info.clone();
-                        }
-                    };
-                    current_path = vec![snapshot_name];
-                } else {
-                    // Non-root snapshots go into current path
-                    // Navigate to current parent
-                    let mut current_snapshot = pool.images.get_mut(&current_path[0]).unwrap();
-                    for path_part in &current_path[1..] {
-                        current_snapshot = current_snapshot.sub.get_mut(path_part).unwrap();
+                // Create or update the snapshot
+                let ret = match current_snapshot
+                    .snapshots
+                    .entry(layer.basename.to_string_lossy().into_owned())
+                {
+                    btree_map::Entry::Vacant(v) => {
+                        let mut snapshot =
+                            Snapshot::new(&pool_path, current_rel_file.clone(), &files_to_domains)
+                                .with_context(|| {
+                                    format!(
+                                        "during snapshot resolve of path {}",
+                                        layer.real_location.join(&layer.basename).display()
+                                    )
+                                })?;
+                        snapshot.vm_info = current_vm_info.clone();
+                        v.insert(snapshot)
                     }
+                    btree_map::Entry::Occupied(o) => o.into_mut(),
+                };
 
-                    // Create or update the snapshot
-                    match current_snapshot.sub.entry(snapshot_name.clone()) {
-                        btree_map::Entry::Vacant(v) => {
-                            let mut snapshot = Snapshot::new(
-                                &pool_path,
-                                current_rel_file.clone(),
-                                &files_to_domains,
-                                &chain_info.locations_map,
-                            )
-                            .with_context(|| {
-                                format!(
-                                    "during snapshot resolve of path {}",
-                                    current_file.display()
-                                )
-                            })?;
-                            snapshot.vm_info = current_vm_info.clone();
-                            v.insert(snapshot);
-                        }
-                        btree_map::Entry::Occupied(o) => {
-                            o.into_mut().vm_info = current_vm_info.clone();
-                        }
-                    }
-
-                    current_path.push(snapshot_name);
-                }
+                current_snapshot = &mut ret.sub;
             }
         }
 
@@ -1802,44 +1729,45 @@ impl VMess {
 
         // Check that the destination does not exist
         if let Err(Error::NotFound(_)) = pool.get_by_name(&params.new_name) {
-            // Generate new filename based on the new name
-            let new_base_name = PathBuf::from(format!("{}.qcow2", params.new_name));
-            let existing = &existing.image_path();
-
-            let tmp_image_path = self.config.tmp_path.join(existing);
-            if tmp_image_path.exists() {
-                let new_adv = self.config.tmp_path.join(&new_base_name);
-                let image_path = self.config.tmp_path.join(existing);
-                let new_link_path = self.config.pool_path.join(&new_base_name);
-                let old_link_path = self.config.pool_path.join(existing);
-                std::fs::rename(&image_path, &new_adv).map_err(|e| {
-                    Error::Context(
-                        format!("rename: {} -> {}", image_path.display(), new_adv.display()),
-                        Box::new(e),
-                    )
-                })?;
-                std::fs::remove_file(&old_link_path).map_err(|e| {
-                    Error::Context(format!("remove {}", old_link_path.display()), Box::new(e))
-                })?;
-                let _ = std::fs::remove_file(&new_link_path);
-                std::os::unix::fs::symlink(&new_adv, &new_link_path).map_err(|e| {
-                    Error::Context(
-                        format!("symlink {} creation", new_adv.display()),
-                        Box::new(e),
-                    )
-                })?;
-            } else {
-                let new_adv = self.config.pool_path.join(&new_base_name);
-                let image_path = self.config.pool_path.join(existing);
-                std::fs::rename(&image_path, &new_adv).map_err(|e| {
-                    Error::Context(
-                        format!("rename: {} -> {}", image_path.display(), new_adv.display()),
-                        Box::new(e),
-                    )
-                })?;
-            }
         } else {
             return Err(Error::AlreadyExists);
+        };
+
+        // Generate new filename based on the new name
+        let new_base_name = PathBuf::from(format!("{}.qcow2", params.new_name));
+        let existing = &existing.image_path();
+
+        let tmp_image_path = self.config.tmp_path.join(existing);
+        if tmp_image_path.exists() {
+            let new_adv = self.config.tmp_path.join(&new_base_name);
+            let image_path = self.config.tmp_path.join(existing);
+            let new_link_path = self.config.pool_path.join(&new_base_name);
+            let old_link_path = self.config.pool_path.join(existing);
+            std::fs::rename(&image_path, &new_adv).map_err(|e| {
+                Error::Context(
+                    format!("rename: {} -> {}", image_path.display(), new_adv.display()),
+                    Box::new(e),
+                )
+            })?;
+            std::fs::remove_file(&old_link_path).map_err(|e| {
+                Error::Context(format!("remove {}", old_link_path.display()), Box::new(e))
+            })?;
+            let _ = std::fs::remove_file(&new_link_path);
+            std::os::unix::fs::symlink(&new_adv, &new_link_path).map_err(|e| {
+                Error::Context(
+                    format!("symlink {} creation", new_adv.display()),
+                    Box::new(e),
+                )
+            })?;
+        } else {
+            let new_adv = self.config.pool_path.join(&new_base_name);
+            let image_path = self.config.pool_path.join(existing);
+            std::fs::rename(&image_path, &new_adv).map_err(|e| {
+                Error::Context(
+                    format!("rename: {} -> {}", image_path.display(), new_adv.display()),
+                    Box::new(e),
+                )
+            })?;
         }
 
         Ok(())
