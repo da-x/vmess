@@ -473,6 +473,21 @@ impl SnapshotCollection {
 
         None
     }
+
+    fn collect_all_snapshots(&self) -> Vec<&Snapshot> {
+        let mut result = Vec::new();
+
+        // Add all snapshots at this level
+        for (_, snapshot) in self.snapshots.iter() {
+            result.push(snapshot);
+
+            // Recursively add snapshots from sub-collections
+            let mut sub_snapshots = snapshot.sub.collect_all_snapshots();
+            result.append(&mut sub_snapshots);
+        }
+
+        result
+    }
 }
 
 #[derive(Debug)]
@@ -489,25 +504,6 @@ struct Snapshot {
 lazy_static! {
     static ref PARSE_QCOW2: Regex = Regex::new("^([^%]+)([%]([^.]*))?[.]qcow2?$").unwrap();
     static ref FROZEN_SUFFIX: Regex = Regex::new("@@[a-f0-9]+$").unwrap();
-}
-
-impl Snapshot {
-    fn join(&self, x: &str) -> PathBuf {
-        let name = self.rel_path.file_name().unwrap().to_str().unwrap();
-        if let Some(cap) = PARSE_QCOW2.captures(&name) {
-            let name = cap.get(1).unwrap().as_str();
-            let mut v = if let Some(snapshot_path) = cap.get(3) {
-                snapshot_path.as_str().split("%").collect()
-            } else {
-                vec![]
-            };
-            v.push(x);
-            self.rel_path
-                .with_file_name(format!("{}%{}.qcow2", name, v.join("%")))
-        } else {
-            panic!();
-        }
-    }
 }
 
 impl VMInfo {
@@ -555,6 +551,14 @@ impl Pool {
         } else {
             Err(Error::NotFound(name.to_owned()))
         }
+    }
+
+    fn get_all_snapshots(&self) -> Vec<&Snapshot> {
+        self.images.collect_all_snapshots()
+    }
+
+    fn strip_frozen_from_name(&self, name: &str) -> String {
+        strip_frozen_suffix(name).to_string()
     }
 }
 
@@ -1526,13 +1530,35 @@ impl VMess {
         }
 
         let new_full_name = params.name.clone();
-        let mut parts: Vec<_> = params.name.split(".").collect();
-        let name = parts.pop().expect("name");
-        let parent_name = parts.join(".");
 
-        let parent = pool.get_by_name(&parent_name)?;
+        // Find the longest existing snapshot for which the new name is a prefix
+        let target_prefix_dot = format!("{}.", params.name);
+        let target_prefix_percent = format!("{}%", params.name);
 
-        let new_base_name = parent.snap.join(name);
+        let parent = {
+            let mut longest_match: Option<&Snapshot> = None;
+            let mut longest_length = 0;
+
+            for snapshot in pool.get_all_snapshots() {
+                // Get the snapshot name without frozen suffix for comparison
+                let snapshot_path_str = snapshot.rel_path.to_string_lossy();
+                let snapshot_name = pool.strip_frozen_from_name(&snapshot_path_str);
+
+                // Check if either target prefix matches this snapshot name
+                if (snapshot_name.starts_with(&target_prefix_dot)
+                    || snapshot_name.starts_with(&target_prefix_percent))
+                    && snapshot_name.len() > longest_length
+                {
+                    longest_match = Some(snapshot);
+                    longest_length = snapshot_name.len();
+                }
+            }
+
+            longest_match
+                .ok_or_else(|| Error::NotFound(format!("No matching parent for {}", params.name)))?
+        };
+
+        let new_base_name = PathBuf::from(format!("{}.qcow2", params.name));
         let new_adv = self.config.pool_path.join(&new_base_name);
 
         // TODO: verify parent is not running
@@ -1584,13 +1610,14 @@ impl VMess {
         }
 
         let pool_path = &self.config.pool_path;
-        let backing = pool_path.join(&parent.image_path());
+        let backing = pool_path.join(&parent.rel_path);
         let backing_basename = backing.file_name().unwrap().to_str().unwrap();
         let backing_disp = backing.display();
 
         info!(
             "Creating new snapshot: {} -> {}",
-            parent_name, new_full_name
+            parent.rel_path.display(),
+            new_full_name
         );
 
         if params.temp {
