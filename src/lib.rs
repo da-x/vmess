@@ -93,8 +93,8 @@ pub enum Error {
     #[error("Template {0} doesn't exist")]
     TemplateDoesntExist(String),
 
-    #[error("Cannot {1} snapshot {0} - has sub snapshots")]
-    HasSubSnapshots(String, &'static str),
+    #[error("Cannot {1} image {0} - has sub images")]
+    HasSubImages(String, &'static str),
 
     #[error("No VM defined for {0}")]
     NoVMDefined(String),
@@ -377,7 +377,7 @@ pub enum CommandMode {
     /// List image files and VMs
     List(List),
 
-    /// Show tree structure of VM images and snapshots
+    /// Show tree structure of VM images and images
     Tree(Tree),
 
     /// Update SSH config based on DHCP of client VMs
@@ -451,7 +451,7 @@ lazy_static::lazy_static! {
     static ref PARSE_QCOW2: Regex = Regex::new("[.]qcow2$").unwrap();
 }
 
-pub(crate) fn is_frozen_snapshot(filename: &str) -> bool {
+pub(crate) fn is_frozen_image(filename: &str) -> bool {
     FROZEN_SUFFIX.is_match(filename)
 }
 
@@ -464,40 +464,40 @@ pub(crate) fn strip_qcow2_suffix(filename: &str) -> String {
 }
 
 #[derive(Debug, Default)]
-struct SnapshotCollection {
-    snapshots: BTreeMap<String, Snapshot>,
+struct ImageCollection {
+    images: BTreeMap<String, Image>,
 }
 
-impl SnapshotCollection {
-    fn get(&self, key: &str) -> Option<&Snapshot> {
-        self.snapshots.get(key)
+impl ImageCollection {
+    fn get(&self, key: &str) -> Option<&Image> {
+        self.images.get(key)
     }
 
-    fn get_mut(&mut self, key: &str) -> Option<&mut Snapshot> {
-        self.snapshots.get_mut(key)
+    fn get_mut(&mut self, key: &str) -> Option<&mut Image> {
+        self.images.get_mut(key)
     }
 
-    fn entry(&mut self, key: String) -> std::collections::btree_map::Entry<'_, String, Snapshot> {
-        self.snapshots.entry(key)
+    fn entry(&mut self, key: String) -> std::collections::btree_map::Entry<'_, String, Image> {
+        self.images.entry(key)
     }
 
-    fn iter(&self) -> std::collections::btree_map::Iter<'_, String, Snapshot> {
-        self.snapshots.iter()
+    fn iter(&self) -> std::collections::btree_map::Iter<'_, String, Image> {
+        self.images.iter()
     }
 
     fn is_empty(&self) -> bool {
-        self.snapshots.is_empty()
+        self.images.is_empty()
     }
 
-    fn find_by_name(&self, name: &str) -> Option<&Snapshot> {
+    fn find_by_name(&self, name: &str) -> Option<&Image> {
         // First check direct match at this level
-        if let Some(snapshot) = self.snapshots.get(name) {
-            return Some(snapshot);
+        if let Some(image) = self.images.get(name) {
+            return Some(image);
         }
 
         // Then search recursively in sub-collections
-        for (_, snapshot) in self.snapshots.iter() {
-            if let Some(found) = snapshot.sub.find_by_name(name) {
+        for (_, image) in self.images.iter() {
+            if let Some(found) = image.sub.find_by_name(name) {
                 return Some(found);
             }
         }
@@ -505,16 +505,16 @@ impl SnapshotCollection {
         None
     }
 
-    fn collect_all_snapshots(&self) -> Vec<&Snapshot> {
+    fn collect_all_images(&self) -> Vec<&Image> {
         let mut result = Vec::new();
 
-        // Add all snapshots at this level
-        for (_, snapshot) in self.snapshots.iter() {
-            result.push(snapshot);
+        // Add all images at this level
+        for (_, image) in self.images.iter() {
+            result.push(image);
 
-            // Recursively add snapshots from sub-collections
-            let mut sub_snapshots = snapshot.sub.collect_all_snapshots();
-            result.append(&mut sub_snapshots);
+            // Recursively add images from sub-collections
+            let mut sub_images = image.sub.collect_all_images();
+            result.append(&mut sub_images);
         }
 
         result
@@ -522,12 +522,12 @@ impl SnapshotCollection {
 }
 
 #[derive(Debug)]
-struct Snapshot {
+struct Image {
     rel_path: PathBuf,
     vm_info: VMInfo,
     size_mb: u64,
     vm_using: Option<String>,
-    sub: SnapshotCollection,
+    sub: ImageCollection,
     frozen: bool,
 }
 
@@ -547,12 +547,12 @@ struct VM {
 
 #[derive(Debug)]
 pub struct Pool {
-    images: SnapshotCollection,
+    images: ImageCollection,
     vms: BTreeMap<String, VM>,
 }
 
 struct GetInfo<'a> {
-    snap: &'a Snapshot,
+    snap: &'a Image,
     vm: Option<&'a VM>,
 }
 
@@ -565,10 +565,10 @@ impl<'a> GetInfo<'a> {
 impl Pool {
     fn get_by_name<'a>(&'a self, name: &str) -> Result<GetInfo<'a>, Error> {
         for try_name in [name.to_owned(), name.replace(".", "%")] {
-            if let Some(snapshot) = self.images.find_by_name(&try_name) {
+            if let Some(image) = self.images.find_by_name(&try_name) {
                 return Ok(GetInfo {
-                    snap: snapshot,
-                    vm: if let Some(vm_name) = &snapshot.vm_using {
+                    snap: image,
+                    vm: if let Some(vm_name) = &image.vm_using {
                         self.vms.get(vm_name)
                     } else {
                         None
@@ -580,8 +580,8 @@ impl Pool {
         return Err(Error::NotFound(name.to_owned()));
     }
 
-    fn get_all_snapshots(&self) -> Vec<&Snapshot> {
-        self.images.collect_all_snapshots()
+    fn get_all_images(&self) -> Vec<&Image> {
+        self.images.collect_all_images()
     }
 
     fn strip_frozen_from_name(&self, name: &str) -> String {
@@ -589,7 +589,7 @@ impl Pool {
     }
 }
 
-impl Snapshot {
+impl Image {
     fn get_filename(root_path: &PathBuf, path: &PathBuf) -> PathBuf {
         return root_path.join(path);
     }
@@ -601,11 +601,11 @@ impl Snapshot {
     ) -> Result<Self, Error> {
         let abs_path = Self::get_filename(root_path, &path);
 
-        // Check if this is a frozen snapshot based on filename
+        // Check if this is a frozen image based on filename
         let filename = path.file_stem().unwrap_or_default().to_string_lossy();
-        let is_frozen = is_frozen_snapshot(&filename);
+        let is_frozen = is_frozen_image(&filename);
 
-        Ok(Snapshot {
+        Ok(Image {
             sub: Default::default(),
             vm_using: files_to_domains.get(&abs_path).map(|x| (*x).to_owned()),
             size_mb: (std::fs::metadata(&abs_path)?.blocks() * 512) / (1024 * 1024),
@@ -845,7 +845,7 @@ impl VMess {
             }
         }
 
-        // Now build the snapshot hierarchy based on actual backing relationships
+        // Now build the image hierarchy based on actual backing relationships
         for chain_info in backing_chains.iter() {
             // Build locations map from the new chain structure for compatibility
             let mut locations_map: std::collections::HashMap<PathBuf, Vec<PathBuf>> =
@@ -862,7 +862,7 @@ impl VMess {
             // Process entire chain uniformly, from root (last) to leaf (first)
             let mut current_vm_info = VMInfo::default();
 
-            let mut current_snapshot = &mut pool.images;
+            let mut current_image = &mut pool.images;
             for layer in chain_info.chain.iter().rev() {
                 let current_rel_file = layer.basename.clone();
                 let current_name_raw = layer.basename.file_stem().unwrap().to_string_lossy();
@@ -881,24 +881,24 @@ impl VMess {
                 let key = layer.basename.to_string_lossy().into_owned();
                 let key = strip_qcow2_suffix(&key);
 
-                // Create or update the snapshot
-                let ret = match current_snapshot.snapshots.entry(key.to_owned()) {
+                // Create or update the image
+                let ret = match current_image.images.entry(key.to_owned()) {
                     btree_map::Entry::Vacant(v) => {
-                        let mut snapshot =
-                            Snapshot::new(&pool_path, current_rel_file.clone(), &files_to_domains)
+                        let mut image =
+                            Image::new(&pool_path, current_rel_file.clone(), &files_to_domains)
                                 .with_context(|| {
                                     format!(
-                                        "during snapshot resolve of path {}",
+                                        "during image resolve of path {}",
                                         layer.real_location.join(&layer.basename).display()
                                     )
                                 })?;
-                        snapshot.vm_info = current_vm_info.clone();
-                        v.insert(snapshot)
+                        image.vm_info = current_vm_info.clone();
+                        v.insert(image)
                     }
                     btree_map::Entry::Occupied(o) => o.into_mut(),
                 };
 
-                current_snapshot = &mut ret.sub;
+                current_image = &mut ret.sub;
             }
         }
 
@@ -962,17 +962,16 @@ impl VMess {
             ));
         }
 
-        fn by_snapshot(
+        fn by_image(
             columns: &IndexSet<Column>,
             config: &Config,
             table: &mut Table,
             pool: &Pool,
-            _image: &Snapshot,
-            snapshot: &Snapshot,
+            image: &Image,
             path: String,
             filter_expr: &query::Expr,
         ) {
-            let abs_image = config.pool_path.join(&snapshot.rel_path);
+            let abs_image = config.pool_path.join(&image.rel_path);
             let tmp = if let Ok(link) = std::fs::read_link(abs_image) {
                 if link.starts_with(&config.tmp_path) {
                     "Y"
@@ -983,7 +982,7 @@ impl VMess {
                 ""
             };
 
-            let (vm_state, volatile, mem_size) = if let Some(vm_using) = &snapshot.vm_using {
+            let (vm_state, volatile, mem_size) = if let Some(vm_using) = &image.vm_using {
                 if let Some(vm) = pool.vms.get(vm_using) {
                     let state = vm.attrs.get("State").map(|x| x.as_str()).unwrap_or("");
                     let vol =
@@ -1021,7 +1020,7 @@ impl VMess {
                 ("", tmp, Cow::from(""))
             };
 
-            let disk_size = format!("{:.2} GB", snapshot.size_mb as f32 / 1024.0);
+            let disk_size = format!("{:.2} GB", image.size_mb as f32 / 1024.0);
 
             let mut row = Row::empty();
             for column in columns {
@@ -1048,44 +1047,22 @@ impl VMess {
                 table.add_row(row);
             }
 
-            // Don't recurse into sub-snapshots to avoid duplicates
-            // Each image in pool.images represents a complete snapshot chain
+            // Don't recurse into sub-images to avoid duplicates
+            // Each image in pool.images represents a complete image chain
         }
 
-        fn by_image(
-            columns: &IndexSet<Column>,
-            config: &Config,
-            table: &mut Table,
-            pool: &Pool,
-            image: &Snapshot,
-            path: String,
-            filter_expr: &query::Expr,
-        ) {
-            by_snapshot(
-                &columns,
-                config,
-                table,
-                pool,
-                &image,
-                &image,
-                path,
-                filter_expr,
-            );
-        }
+        for image in pool.get_all_images() {
+            // Generate display name for this image (remove .qcow2 extension)
+            let image_stem = image.rel_path.file_stem().unwrap().to_string_lossy();
+            let image_name = strip_frozen_suffix(&image_stem).replace('%', ".");
 
-        for snapshot in pool.get_all_snapshots() {
-            // Generate display name for this snapshot (remove .qcow2 extension)
-            let snapshot_stem = snapshot.rel_path.file_stem().unwrap().to_string_lossy();
-            let snapshot_name = strip_frozen_suffix(&snapshot_stem).replace('%', ".");
-
-            by_snapshot(
+            by_image(
                 &columns,
                 &self.config,
                 &mut table,
                 &pool,
-                snapshot, // image parameter - not used anymore
-                snapshot,
-                snapshot_name,
+                image,
+                image_name,
                 &filter_expr,
             );
         }
@@ -1103,24 +1080,24 @@ impl VMess {
         let filter_expr =
             query::Expr::parse_cmd(&params.filter).with_context(|| format!("during parse cmd"))?;
 
-        fn print_snapshot_tree(
-            snapshot_collection: &SnapshotCollection,
+        fn print_image_tree(
+            image_collection: &ImageCollection,
             pool: &Pool,
             config: &Config,
             filter_expr: &query::Expr,
             prefix: &str,
             _is_last: bool,
         ) {
-            let snapshots: Vec<_> = snapshot_collection.iter().collect();
+            let images: Vec<_> = image_collection.iter().collect();
 
-            for (i, (_name, snapshot)) in snapshots.iter().enumerate() {
-                let is_last_item = i == snapshots.len() - 1;
+            for (i, (_name, image)) in images.iter().enumerate() {
+                let is_last_item = i == images.len() - 1;
 
-                // Generate display name for this snapshot
-                let snapshot_name = snapshot.rel_path.file_stem().unwrap().to_string_lossy();
+                // Generate display name for this image
+                let image_name = image.rel_path.file_stem().unwrap().to_string_lossy();
 
-                // Check if this snapshot matches the filter
-                let (vm_state, vm_info) = if let Some(vm_using) = &snapshot.vm_using {
+                // Check if this image matches the filter
+                let (vm_state, vm_info) = if let Some(vm_using) = &image.vm_using {
                     if let Some(vm) = pool.vms.get(vm_using) {
                         let state = vm.attrs.get("State").map(|x| x.as_str()).unwrap_or("");
                         let vm_state = match state {
@@ -1138,7 +1115,7 @@ impl VMess {
 
                 let mi = crate::query::MatchInfo {
                     vm_state,
-                    name: &snapshot_name,
+                    name: &image_name,
                 };
 
                 if filter_expr.match_info(&mi) {
@@ -1149,38 +1126,31 @@ impl VMess {
                         format!("{}├── ", prefix)
                     };
 
-                    // Print snapshot info
-                    let frozen_indicator = if snapshot.frozen { " [FROZEN]" } else { "" };
-                    let disk_size = format!("{:.2} GB", snapshot.size_mb as f32 / 1024.0);
+                    // Print image info
+                    let frozen_indicator = if image.frozen { " [FROZEN]" } else { "" };
+                    let disk_size = format!("{:.2} GB", image.size_mb as f32 / 1024.0);
 
                     println!(
                         "{}{} ({}){}{}",
-                        current_prefix, snapshot_name, disk_size, vm_info, frozen_indicator
+                        current_prefix, image_name, disk_size, vm_info, frozen_indicator
                     );
                 }
 
-                // Recursively print sub-snapshots
-                if !snapshot.sub.is_empty() {
+                // Recursively print sub-images
+                if !image.sub.is_empty() {
                     let next_prefix = if is_last_item {
                         format!("{}    ", prefix)
                     } else {
                         format!("{}│   ", prefix)
                     };
 
-                    print_snapshot_tree(
-                        &snapshot.sub,
-                        pool,
-                        config,
-                        filter_expr,
-                        &next_prefix,
-                        true,
-                    );
+                    print_image_tree(&image.sub, pool, config, filter_expr, &next_prefix, true);
                 }
             }
         }
 
         println!("VM Image Tree:");
-        print_snapshot_tree(&pool.images, &pool, &self.config, &filter_expr, "", true);
+        print_image_tree(&pool.images, &pool, &self.config, &filter_expr, "", true);
 
         Ok(())
     }
@@ -1431,7 +1401,7 @@ impl VMess {
 
         let to_bring_up = pool.get_by_name(&params.full)?;
         if !to_bring_up.snap.sub.is_empty() {
-            return Err(Error::HasSubSnapshots(params.full.clone(), ""));
+            return Err(Error::HasSubImages(params.full.clone(), ""));
         }
 
         info!("Preparing to spawn VM {}", params.full);
@@ -1585,26 +1555,26 @@ impl VMess {
 
         let new_full_name = params.name.clone();
 
-        // Find the longest existing snapshot for which the new name is a prefix
+        // Find the longest existing image for which the new name is a prefix
         let target_prefix_dot = format!("{}.", params.name);
         let target_prefix_percent = format!("{}%", params.name);
 
         let parent = {
-            let mut longest_match: Option<&Snapshot> = None;
+            let mut longest_match: Option<&Image> = None;
             let mut longest_length = 0;
 
-            for snapshot in pool.get_all_snapshots() {
-                // Get the snapshot name without frozen suffix for comparison
-                let snapshot_path_str = snapshot.rel_path.to_string_lossy();
-                let snapshot_name = pool.strip_frozen_from_name(&snapshot_path_str);
+            for image in pool.get_all_images() {
+                // Get the image name without frozen suffix for comparison
+                let image_path_str = image.rel_path.to_string_lossy();
+                let image_name = pool.strip_frozen_from_name(&image_path_str);
 
-                // Check if either target prefix matches this snapshot name
-                if (snapshot_name.starts_with(&target_prefix_dot)
-                    || snapshot_name.starts_with(&target_prefix_percent))
-                    && snapshot_name.len() > longest_length
+                // Check if either target prefix matches this image name
+                if (image_name.starts_with(&target_prefix_dot)
+                    || image_name.starts_with(&target_prefix_percent))
+                    && image_name.len() > longest_length
                 {
-                    longest_match = Some(snapshot);
-                    longest_length = snapshot_name.len();
+                    longest_match = Some(image);
+                    longest_length = image_name.len();
                 }
             }
 
@@ -1669,7 +1639,7 @@ impl VMess {
         let backing_disp = backing.display();
 
         info!(
-            "Creating new snapshot: {} -> {}",
+            "Creating new image: {} -> {}",
             parent.rel_path.display(),
             new_full_name
         );
@@ -1773,7 +1743,7 @@ impl VMess {
 
         let existing = pool.get_by_name(&params.name)?;
         if !existing.snap.sub.is_empty() {
-            return Err(Error::HasSubSnapshots(params.name.clone(), "start"));
+            return Err(Error::HasSubImages(params.name.clone(), "start"));
         }
 
         let vmname_prefix = self.get_vm_prefix();
@@ -1832,10 +1802,10 @@ impl VMess {
     fn rename(&mut self, params: Rename) -> Result<(), Error> {
         let pool = self.get_pool()?;
 
-        // Check that the source snapshot exists
+        // Check that the source image exists
         let existing = pool.get_by_name(&params.name)?;
         if let Some(_) = &existing.vm {
-            // TODO: this can have a workaround
+            // FIXME: this can have a workaround
             return Err(Error::CurrentlyDefined);
         }
 
@@ -1938,30 +1908,30 @@ impl VMess {
             Ok(false)
         };
 
-        // Get all snapshots and process them
-        for snapshot in pool.get_all_snapshots() {
-            // Generate display name for this snapshot
-            let snapshot_path_str = snapshot.rel_path.to_string_lossy();
-            let snapshot_name = strip_frozen_suffix(&snapshot_path_str).replace('%', ".");
+        // Get all images and process them
+        for image in pool.get_all_images() {
+            // Generate display name for this image
+            let image_path_str = image.rel_path.to_string_lossy();
+            let image_name = strip_frozen_suffix(&image_path_str).replace('%', ".");
 
-            let vm = if let Some(name) = &snapshot.vm_using {
+            let vm = if let Some(name) = &image.vm_using {
                 pool.vms.get(name)
             } else {
                 None
             };
 
-            if !matcher(&snapshot_name)? {
+            if !matcher(&image_name)? {
                 continue;
             }
 
             if params.dry_run {
-                println!("{}", snapshot_name);
+                println!("{}", image_name);
                 continue;
             }
 
-            info!("About to remove VM and image files for {}", snapshot_name);
+            info!("About to remove VM and image files for {}", image_name);
 
-            let image_path = &snapshot.rel_path;
+            let image_path = &image.rel_path;
             if let Some(vm) = &vm {
                 if !params.force {
                     return Err(Error::CurrentlyDefined);
@@ -1969,7 +1939,7 @@ impl VMess {
 
                 info!(
                     "Stopping VM for {}{}",
-                    snapshot_name,
+                    image_name,
                     vm.attrs
                         .get("State")
                         .map(|s| format!(", state: {s}"))
@@ -1987,7 +1957,7 @@ impl VMess {
                 }
             }
 
-            info!("Remove image files for {}", snapshot_name);
+            info!("Remove image files for {}", image_name);
 
             let pool_image_path = self.config.pool_path.join(&image_path);
             std::fs::remove_file(&pool_image_path)?;
@@ -2073,8 +2043,8 @@ impl VMess {
 
             let address = address.trim().to_owned();
             if address.len() > 0 {
-                let username = if let Ok(snapshot) = pool.get_by_name(short_vmname) {
-                    if let Some(username) = &snapshot.snap.vm_info.username {
+                let username = if let Ok(image) = pool.get_by_name(short_vmname) {
+                    if let Some(username) = &image.snap.vm_info.username {
                         Some(username.as_str())
                     } else {
                         None
