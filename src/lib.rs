@@ -330,6 +330,9 @@ pub struct List {
     #[structopt(short = "n", long = "no-headers")]
     pub no_headers: bool,
 
+    #[structopt(long = "all")]
+    pub all: bool,
+
     #[structopt(name = "filter")]
     pub filter: Vec<String>,
 }
@@ -586,6 +589,8 @@ struct VM {
 pub struct Pool {
     images: ImageCollection,
     vms: BTreeMap<String, VM>,
+    tags: HashMap<String, String>,     // tag_name -> image_name
+    rev_tags: HashMap<String, String>, // image_name -> tag_name
 }
 
 struct GetInfo<'a> {
@@ -601,7 +606,14 @@ impl<'a> GetInfo<'a> {
 
 impl Pool {
     fn get_by_name<'a>(&'a self, name: &str) -> Result<GetInfo<'a>, Error> {
-        for try_name in [name.to_owned(), name.replace(".", "%")] {
+        // Check if name is a tag, and use the image name if it is
+        let lookup_name = if let Some(image_name) = self.tags.get(name) {
+            image_name.as_str()
+        } else {
+            name
+        };
+
+        for try_name in [lookup_name.to_owned(), lookup_name.replace(".", "%")] {
             if let Some(image) = self.images.find_by_name(&try_name) {
                 return Ok(GetInfo {
                     snap: image,
@@ -622,8 +634,14 @@ impl Pool {
     }
 
     fn get_backing_chain_by_name(&self, name: &str) -> Result<Vec<&Image>, Error> {
-        // Find the image by name and get its backing chain
-        for try_name in [name.to_owned(), name.replace(".", "%")] {
+        // Check if name is a tag, and use the image name if it is
+        let lookup_name = if let Some(image_name) = self.tags.get(name) {
+            image_name.as_str()
+        } else {
+            name
+        };
+
+        for try_name in [lookup_name.to_owned(), lookup_name.replace(".", "%")] {
             let mut chain = Vec::new();
             if self.images.find_by_name_with_parents(&try_name, &mut chain) {
                 return Ok(chain);
@@ -850,6 +868,8 @@ impl VMess {
         let mut pool = Pool {
             images: Default::default(),
             vms: Default::default(),
+            tags: HashMap::new(),
+            rev_tags: HashMap::new(),
         };
 
         let mut files_to_domains = HashMap::new();
@@ -977,6 +997,50 @@ impl VMess {
                 };
 
                 current_image = &mut ret.sub;
+            }
+        }
+
+        // Load tags from symlinks within each pool directory
+        for lookup_path in &lookup_paths {
+            for entry in std::fs::read_dir(lookup_path)
+                .with_context(|| format!("reading directory {} for tags", lookup_path.display()))?
+            {
+                let entry = entry.with_context(|| format!("during entry resolve for tags"))?;
+                let path = entry.path();
+
+                // Check if it's a symlink
+                if !path.is_symlink() {
+                    continue;
+                }
+
+                let target = match std::fs::canonicalize(&path) {
+                    Ok(target) => target,
+                    Err(_) => continue,
+                };
+
+                // Check if target is in the same pool (not outside)
+                let target_relative = match target.strip_prefix(lookup_path) {
+                    Ok(rel) => rel,
+                    Err(_) => continue,
+                };
+
+                // Remove .qcow2 suffix from symlink name to get tag name
+                let tag_name = path
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+
+                // Remove .qcow2 suffix from target name to get image name
+                let image_name = target_relative
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+
+                // Add to tags maps
+                pool.tags.insert(tag_name.clone(), image_name.clone());
+                pool.rev_tags.insert(image_name, tag_name);
             }
         }
 
@@ -1119,6 +1183,13 @@ impl VMess {
             let image_stem = image.rel_path.file_stem().unwrap().to_string_lossy();
             let image_name = strip_frozen_suffix(&image_stem).replace('%', ".");
 
+            // Skip frozen images that have no tags pointing to them unless --all is specified
+            if image.frozen && !params.all {
+                if !pool.rev_tags.contains_key(&image_name) {
+                    continue;
+                }
+            }
+
             by_image(
                 &columns,
                 &self.config,
@@ -1192,10 +1263,20 @@ impl VMess {
                     // Print image info
                     let frozen_indicator = if image.frozen { " [FROZEN]" } else { "" };
                     let disk_size = format!("{:.2} GB", image.size_mb as f32 / 1024.0);
+                    let tag_info = if let Some(tag) = pool.rev_tags.get(&image_name.to_string()) {
+                        format!(" [tag: {}]", tag)
+                    } else {
+                        String::new()
+                    };
 
                     println!(
-                        "{}{} ({}){}{}",
-                        current_prefix, image_name, disk_size, vm_info, frozen_indicator
+                        "{}{}{}{}{}{}",
+                        current_prefix,
+                        image_name,
+                        tag_info,
+                        format!(" ({})", disk_size),
+                        vm_info,
+                        frozen_indicator
                     );
                 }
 
@@ -1214,6 +1295,14 @@ impl VMess {
 
         println!("VM Image Tree:");
         print_image_tree(&pool.images, &pool, &self.config, &filter_expr, "", true);
+
+        // Display loaded tags
+        if !pool.tags.is_empty() {
+            println!("\nLoaded Tags:");
+            for (tag_name, image_name) in &pool.tags {
+                println!("  {} -> {}", tag_name, image_name);
+            }
+        }
 
         Ok(())
     }
