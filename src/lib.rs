@@ -864,6 +864,33 @@ impl VMess {
         self.get_pool_detailed(false)
     }
 
+    /// Ensure all images in the backing chain have symlinks in pool_path
+    fn ensure_backing_chain_symlinks(&self, backing_chain: &[&Image]) -> Result<(), Error> {
+        for image in backing_chain.iter() {
+            if image.pool_directory != self.config.pool_path {
+                let target_path = image.get_absolute_path();
+                let symlink_path = self.config.pool_path.join(&image.rel_path);
+
+                if !symlink_path.exists() {
+                    std::fs::create_dir_all(&self.config.pool_path)?;
+                    std::os::unix::fs::symlink(&target_path, &symlink_path).with_context(|| {
+                        format!(
+                            "Failed to create symlink from {} to {}",
+                            target_path.display(),
+                            symlink_path.display()
+                        )
+                    })?;
+                    info!(
+                        "Created symlink: {} -> {}",
+                        symlink_path.display(),
+                        target_path.display()
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn get_pool_detailed(&self, with_vm_list: bool) -> Result<Pool, Error> {
         let mut pool = Pool {
             images: Default::default(),
@@ -1721,28 +1748,7 @@ impl VMess {
             .with_context(|| format!("Failed to get backing chain for {}", params.full))?;
 
         // Ensure all images in the backing chain have symlinks in pool_path
-        for image in backing_chain.iter() {
-            if image.pool_directory != self.config.pool_path {
-                let target_path = image.get_absolute_path();
-                let symlink_path = self.config.pool_path.join(&image.rel_path);
-
-                if !symlink_path.exists() {
-                    std::fs::create_dir_all(&self.config.pool_path)?;
-                    std::os::unix::fs::symlink(&target_path, &symlink_path).with_context(|| {
-                        format!(
-                            "Failed to create symlink from {} to {}",
-                            target_path.display(),
-                            symlink_path.display()
-                        )
-                    })?;
-                    info!(
-                        "Created symlink: {} -> {}",
-                        symlink_path.display(),
-                        target_path.display()
-                    );
-                }
-            }
-        }
+        self.ensure_backing_chain_symlinks(&backing_chain)?;
 
         // Use the symlink path in pool_path for the VM configuration
         let vm_disk_path = self.config.pool_path.join(&to_bring_up.snap.rel_path);
@@ -1913,6 +1919,24 @@ impl VMess {
                     longest_match = Some(image);
                     longest_length = image_name.len();
                 }
+
+                // Also check against tag names for frozen images
+                if image.frozen {
+                    let image_stem = image.rel_path.file_stem().unwrap().to_string_lossy();
+                    if let Some(tag_name) = pool.rev_tags.get(&image_stem.to_string()) {
+                        let tag_prefix_dot = format!("{}.", tag_name);
+                        let tag_prefix_percent = format!("{}%", tag_name);
+                        
+                        // Check if the new name starts with this tag name as prefix
+                        if (params.name.starts_with(&tag_prefix_dot)
+                            || params.name.starts_with(&tag_prefix_percent))
+                            && tag_name.len() > longest_length
+                        {
+                            longest_match = Some(image);
+                            longest_length = tag_name.len();
+                        }
+                    }
+                }
             }
 
             longest_match
@@ -1981,6 +2005,14 @@ impl VMess {
             new_full_name
         );
 
+        // Get the complete backing chain for the parent image
+        let backing_chain = pool
+            .get_backing_chain_by_name(&parent.rel_path.file_stem().unwrap().to_string_lossy())
+            .with_context(|| format!("Failed to get backing chain for parent {}", parent.rel_path.display()))?;
+
+        // Ensure all images in the backing chain have symlinks in pool_path
+        self.ensure_backing_chain_symlinks(&backing_chain)?;
+
         if params.temp {
             std::fs::create_dir_all(&self.config.tmp_path)?;
         }
@@ -1995,7 +2027,14 @@ impl VMess {
         }
 
         let cmd = format!("qemu-img create -f qcow2 {new_disp} -F qcow2 -b {backing_disp}");
-        let v = ibash_stdout!("{}", cmd)?;
+        let v = ibash_stdout!("{}", cmd).with_context(|| {
+            format!(
+                "Failed to create qcow2 image '{}' with backing file '{}'. \
+                Make sure the backing file exists and is accessible.",
+                new_disp,
+                backing_disp
+            )
+        })?;
         info!("qemu-image create result: {:?}", v);
 
         // Make sure the backing store pathname is relative.
