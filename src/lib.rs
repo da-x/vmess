@@ -229,6 +229,10 @@ pub struct Rename {
 
     /// New full name of the domain
     pub new_name: String,
+
+    /// Force rename even for images in shared pools
+    #[structopt(name = "force", short = "f")]
+    pub force: bool,
 }
 
 #[derive(Debug, StructOpt, Clone, Default)]
@@ -620,7 +624,7 @@ impl Image {
         let is_frozen = is_frozen_image(&filename);
 
         let vm_using = files_to_domains.get(&abs_path).map(|x| (*x).to_owned());
-        
+
         Ok(Image {
             sub: Default::default(),
             vm_using,
@@ -1967,6 +1971,18 @@ impl VMess {
             return Err(Error::AlreadyExists);
         };
 
+        // Check if image is in a shared pool and force is not specified
+        let is_in_shared_pool = self.config.pools.iter().any(|pool| {
+            pool.shared && existing.snap.pool_directory == pool.path
+        });
+        
+        if is_in_shared_pool && !params.force {
+            return Err(Error::FreeText(format!(
+                "Cannot rename {} - image is in a shared pool. Use --force to override",
+                params.name
+            )));
+        }
+
         // Generate new filename based on the new name
         let new_base_name = PathBuf::from(format!("{}.qcow2", params.new_name));
         let existing = &existing.image_path();
@@ -2287,7 +2303,7 @@ impl VMess {
                 let s = cap.get(1).unwrap().as_str();
                 let path = PathBuf::from(s);
                 files_to_domains.insert(path.clone(), short_vmname.to_owned());
-                
+
                 // If this is a symlink, also add the target path
                 if let Ok(target) = std::fs::canonicalize(&path) {
                     if target != path {
