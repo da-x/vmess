@@ -522,6 +522,25 @@ impl ImageCollection {
         None
     }
 
+    fn find_by_name_with_parents<'a>(&'a self, name: &str, v: &mut Vec<&'a Image>) -> bool {
+        // First check direct match at this level
+        if let Some(image) = self.images.get(name) {
+            v.push(image);
+            return true;
+        }
+
+        // Then search recursively in sub-collections
+        for (_, image) in self.images.iter() {
+            v.push(image);
+            if image.sub.find_by_name_with_parents(name, v) {
+                return true;
+            }
+            v.pop();
+        }
+
+        false
+    }
+
     fn collect_all_images(&self) -> Vec<&Image> {
         let mut result = Vec::new();
 
@@ -602,6 +621,19 @@ impl Pool {
         self.images.collect_all_images()
     }
 
+    fn get_backing_chain_by_name(&self, name: &str) -> Result<Vec<&Image>, Error> {
+        // Find the image by name and get its backing chain
+        for try_name in [name.to_owned(), name.replace(".", "%")] {
+            let mut chain = Vec::new();
+            if self.images.find_by_name_with_parents(&try_name, &mut chain) {
+                return Ok(chain);
+            }
+        }
+        
+        Err(Error::NotFound(name.to_owned()))
+    }
+
+
     fn strip_frozen_from_name(&self, name: &str) -> String {
         strip_frozen_suffix(name).to_string()
     }
@@ -634,6 +666,10 @@ impl Image {
             pool_directory: pool_directory.clone(),
             frozen: is_frozen,
         })
+    }
+
+    fn get_absolute_path(&self) -> PathBuf {
+        self.pool_directory.join(&self.rel_path)
     }
 
     fn get_pool_name(&self, config: &Config) -> String {
@@ -1239,7 +1275,7 @@ impl VMess {
             }
         }
 
-        let image_path = self.config.pool_path.join(&existing.snap.rel_path);
+        let image_path = existing.snap.get_absolute_path();
         let image_name_stem = existing
             .snap
             .rel_path
@@ -1250,9 +1286,9 @@ impl VMess {
         // Calculate SHA256 hash
         let hash_hex = if vm_is_running && params.force.as_deref() == Some("while-running") {
             // Copy image to temporary file first
-            let temp_path = self
-                .config
-                .pool_path
+            let temp_path = existing
+                .snap
+                .pool_directory
                 .join(format!(".tmp-freeze.{}.qcow2.tmp", image_name_stem));
             info!("Creating temporary copy for running VM");
 
@@ -1295,7 +1331,7 @@ impl VMess {
 
         // Create new frozen filename
         let frozen_name = format!("{}@@{}.qcow2", image_name_stem, hash_hex);
-        let frozen_path = self.config.pool_path.join(&frozen_name);
+        let frozen_path = existing.snap.pool_directory.join(&frozen_name);
 
         info!("Freezing {} -> {}", params.name, frozen_name);
 
@@ -1560,16 +1596,54 @@ impl VMess {
             return Err(Error::HasSubImages(params.full.clone(), ""));
         }
 
+        // Check if image is frozen - cannot spawn frozen (read-only) images
+        if to_bring_up.snap.frozen {
+            return Err(Error::FreeText(format!(
+                "Cannot spawn {} - image is frozen (read-only)",
+                params.full
+            )));
+        }
+
         info!("Preparing to spawn VM {}", params.full);
 
         let mut xml = self.get_template(&params.base_template)?;
 
-        let to_bring_up_image = self.config.pool_path.join(&to_bring_up.image_path());
-        let to_bring_up_image_path = to_bring_up_image.display();
+        // Get the complete backing chain for this image
+        let backing_chain = pool
+            .get_backing_chain_by_name(&params.full)
+            .with_context(|| format!("Failed to get backing chain for {}", params.full))?;
 
-        if to_bring_up_image.metadata()?.permissions().readonly() {
+        // Ensure all images in the backing chain have symlinks in pool_path
+        for image in backing_chain.iter() {
+            if image.pool_directory != self.config.pool_path {
+                let target_path = image.get_absolute_path();
+                let symlink_path = self.config.pool_path.join(&image.rel_path);
+
+                if !symlink_path.exists() {
+                    std::fs::create_dir_all(&self.config.pool_path)?;
+                    std::os::unix::fs::symlink(&target_path, &symlink_path).with_context(|| {
+                        format!(
+                            "Failed to create symlink from {} to {}",
+                            target_path.display(),
+                            symlink_path.display()
+                        )
+                    })?;
+                    info!(
+                        "Created symlink: {} -> {}",
+                        symlink_path.display(),
+                        target_path.display()
+                    );
+                }
+            }
+        }
+
+        // Use the symlink path in pool_path for the VM configuration
+        let vm_disk_path = self.config.pool_path.join(&to_bring_up.snap.rel_path);
+        let to_bring_up_image_path = vm_disk_path.display();
+
+        if vm_disk_path.metadata()?.permissions().readonly() {
             info!("Setting image to read-write");
-            if to_bring_up_image.metadata()?.uid() != get_current_uid() {
+            if vm_disk_path.metadata()?.uid() != get_current_uid() {
                 ibash_stdout!("sudo -u qemu chmod u+w {to_bring_up_image_path}")?;
             } else {
                 ibash_stdout!("chmod u+w {to_bring_up_image_path}")?;
@@ -1972,10 +2046,12 @@ impl VMess {
         };
 
         // Check if image is in a shared pool and force is not specified
-        let is_in_shared_pool = self.config.pools.iter().any(|pool| {
-            pool.shared && existing.snap.pool_directory == pool.path
-        });
-        
+        let is_in_shared_pool = self
+            .config
+            .pools
+            .iter()
+            .any(|pool| pool.shared && existing.snap.pool_directory == pool.path);
+
         if is_in_shared_pool && !params.force {
             return Err(Error::FreeText(format!(
                 "Cannot rename {} - image is in a shared pool. Use --force to override",
