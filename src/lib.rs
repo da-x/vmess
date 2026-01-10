@@ -11,7 +11,7 @@ use std::io::BufReader;
 use std::io::Read;
 use std::io::{BufWriter, Write as OtherWrite};
 use std::os::unix::prelude::MetadataExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 use lazy_static::lazy_static;
@@ -354,6 +354,15 @@ pub struct Freeze {
 }
 
 #[derive(Debug, StructOpt, Clone)]
+pub struct Move {
+    /// Name of the shared pool to move the image to
+    pub pool: String,
+
+    /// Full name of the image to move
+    pub image: String,
+}
+
+#[derive(Debug, StructOpt, Clone)]
 pub enum CommandMode {
     New(New),
 
@@ -399,6 +408,9 @@ pub enum CommandMode {
 
     /// Freeze a VM image by adding SHA256 hash to filename
     Freeze(Freeze),
+
+    /// Move an image and its backing chain to a shared pool
+    Move(Move),
 
     /// Update SSH config based on DHCP of client VMs
     UpdateSsh(UpdateSshParams),
@@ -802,6 +814,9 @@ impl VMess {
             }
             CommandMode::Freeze(params) => {
                 self.freeze(params)?;
+            }
+            CommandMode::Move(params) => {
+                self.move_image(params)?;
             }
             CommandMode::Fork(params) => {
                 self.fork(params)?;
@@ -1366,35 +1381,47 @@ impl VMess {
             return Err(Error::HasSubImages(params.name.clone(), "freeze"));
         }
 
-        let vm_is_running = if let Some(vm) = &existing.vm {
+        // Check VM state - must be undefined for freezing
+        if let Some(vm) = &existing.vm {
             let state = vm.attrs.get("State").map(|x| x.as_str()).unwrap_or("");
-            state == "running"
-        } else {
-            false
-        };
+            let vm_is_running = state == "running";
 
-        // Handle force options and VM state
-        if vm_is_running {
             match params.force.as_deref() {
                 Some("stop") => {
-                    info!("Stopping VM {} before freeze", params.name);
-                    self.stop(Stop {
-                        name: params.name.clone(),
+                    if vm_is_running {
+                        info!("Stopping VM {} before freeze", params.name);
+                        self.stop(Stop {
+                            name: params.name.clone(),
+                        })?;
+                    }
+                    info!("Undefining VM {} before freeze", params.name);
+                    self.undefine(Undefine {
+                        names: vec![params.name.clone()],
                     })?;
                 }
                 Some("while-running") => {
-                    info!("Freezing while VM {} is running", params.name);
+                    info!(
+                        "Freezing while VM {} is running (VM will remain defined)",
+                        params.name
+                    );
                     // Continue with freeze process
                 }
                 None => {
-                    return Err(Error::FreeText(format!(
-                        "Cannot freeze {} - VM is running. Use --force=stop or --force=while-running",
-                        params.name
-                    )));
+                    if vm_is_running {
+                        return Err(Error::FreeText(format!(
+                            "Cannot freeze {} - VM is running. Use --force=stop-undefine or --force=while-running",
+                            params.name
+                        )));
+                    } else {
+                        return Err(Error::FreeText(format!(
+                            "Cannot freeze {} - VM is defined but not running. Use --force=stop-undefine to undefine it first, or --force=while-running to freeze anyway",
+                            params.name
+                        )));
+                    }
                 }
                 Some(other) => {
                     return Err(Error::FreeText(format!(
-                        "Invalid force option '{}'. Use 'stop' or 'while-running'",
+                        "Invalid force option '{}'. Use 'stop-undefine' or 'while-running'",
                         other
                     )));
                 }
@@ -1410,7 +1437,14 @@ impl VMess {
             .to_string_lossy();
 
         // Calculate SHA256 hash
-        let hash_hex = if vm_is_running && params.force.as_deref() == Some("while-running") {
+        let should_copy_while_running = if let Some(vm) = &existing.vm {
+            let state = vm.attrs.get("State").map(|x| x.as_str()).unwrap_or("");
+            state == "running" && params.force.as_deref() == Some("while-running")
+        } else {
+            false
+        };
+
+        let hash_hex = if should_copy_while_running {
             // Copy image to temporary file first
             let temp_path = existing
                 .snap
@@ -1466,7 +1500,10 @@ impl VMess {
             .with_context(|| format!("Failed to rename image to frozen filename"))?;
 
         // Create a tag symlink to the frozen image
-        let tag_symlink_path = existing.snap.pool_directory.join(format!("{}.qcow2", params.name));
+        let tag_symlink_path = existing
+            .snap
+            .pool_directory
+            .join(format!("{}.qcow2", params.name));
         if let Err(e) = std::os::unix::fs::symlink(&frozen_name, &tag_symlink_path) {
             warn!("Failed to create tag symlink: {}", e);
         } else {
@@ -1478,6 +1515,155 @@ impl VMess {
             params.name,
             &hash_hex[..8]
         );
+        Ok(())
+    }
+
+    fn move_image(&mut self, params: Move) -> Result<(), Error> {
+        use std::process;
+
+        let pool = self.get_pool()?;
+
+        // Check that the source image exists
+        let existing = pool.get_by_name(&params.image)?;
+
+        // Validate the target pool exists and is shared
+        let target_pool = self
+            .config
+            .pools
+            .iter()
+            .find(|p| p.name == params.pool)
+            .ok_or_else(|| Error::InvalidPoolName(params.pool.clone()))?;
+
+        if !target_pool.shared {
+            return Err(Error::FreeText(format!(
+                "Target pool '{}' should be a shared one.",
+                params.pool
+            )));
+        }
+
+        // Check that the image is in the main pool or tmp pool (not in a shared pool)
+        let is_in_main_pool = existing.snap.pool_directory == self.config.pool_path;
+        let is_in_tmp_pool = existing.snap.pool_directory == self.config.tmp_path;
+
+        if !is_in_main_pool && !is_in_tmp_pool {
+            return Err(Error::FreeText(format!(
+                "Image '{}' is in a shared pool. Only images from the main pool or tmp pool can be moved.",
+                params.image
+            )));
+        }
+
+        info!(
+            "Moving image '{}' to shared pool '{}'",
+            params.image, params.pool
+        );
+
+        // Create temporary directory with PID and hostname
+        let hostname = std::env::var("HOSTNAME")
+            .or_else(|_| std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_string()))
+            .unwrap_or_else(|_| "unknown".to_string());
+        let pid = process::id();
+        let tmp_dir_name = format!(".tmp.{}.{}", pid, hostname);
+        let tmp_dir = target_pool.path.join(&tmp_dir_name);
+
+        // Create temporary directory
+        std::fs::create_dir_all(&tmp_dir).with_context(|| {
+            format!("Failed to create temporary directory {}", tmp_dir.display())
+        })?;
+
+        info!("Created temporary directory: {}", tmp_dir.display());
+
+        // Move the specific image to temporary directory
+        let source_path = existing.snap.get_absolute_path();
+        let tmp_path = tmp_dir.join(&existing.snap.rel_path);
+
+        info!("Moving {} to temporary location", source_path.display());
+
+        // Try hard link first, fallback to copy
+        if let Err(_) = std::fs::hard_link(&source_path, &tmp_path) {
+            info!("Hard link failed, copying file instead");
+            std::fs::copy(&source_path, &tmp_path).with_context(|| {
+                format!(
+                    "Failed to copy {} to {}",
+                    source_path.display(),
+                    tmp_path.display()
+                )
+            })?;
+        } else {
+            info!("Successfully hard linked file");
+        }
+
+        // Move file from temporary directory to final location
+        let final_path = target_pool.path.join(&existing.snap.rel_path);
+
+        // Ensure parent directory exists
+        if let Some(parent) = final_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        std::fs::rename(&tmp_path, &final_path).with_context(|| {
+            format!(
+                "Failed to move {} to final location {}",
+                tmp_path.display(),
+                final_path.display()
+            )
+        })?;
+
+        info!("Moved {} to {}", tmp_path.display(), final_path.display());
+
+        // Recreate tag symlinks in target pool if they exist
+        let image_stem = existing
+            .snap
+            .rel_path
+            .file_stem()
+            .unwrap()
+            .to_string_lossy();
+        if let Some(tag_name) = pool.rev_tags.get(&image_stem.to_string()) {
+            let new_tag_path = target_pool.path.join(format!("{}.qcow2", tag_name));
+
+            // Create symlink in target pool
+            if let Err(e) = std::os::unix::fs::symlink(&existing.snap.rel_path, &new_tag_path) {
+                warn!("Failed to create tag symlink in target pool: {}", e);
+            } else {
+                info!("Created tag '{}' in target pool", tag_name);
+            }
+        }
+
+        // Remove original file
+        std::fs::remove_file(&source_path)
+            .with_context(|| format!("Failed to remove original file {}", source_path.display()))?;
+        info!("Removed original file: {}", source_path.display());
+
+        // Remove original tag symlink
+        if let Some(tag_name) = pool.rev_tags.get(&image_stem.to_string()) {
+            let old_tag_path = existing
+                .snap
+                .pool_directory
+                .join(format!("{}.qcow2", tag_name));
+            if old_tag_path.is_symlink() {
+                if let Err(e) = std::fs::remove_file(&old_tag_path) {
+                    warn!("Failed to remove original tag symlink: {}", e);
+                } else {
+                    info!("Removed original tag symlink: {}", old_tag_path.display());
+                }
+            }
+        }
+
+        // Try to remove temporary directory
+        if let Err(e) = std::fs::remove_dir(&tmp_dir) {
+            warn!(
+                "Failed to remove temporary directory {}: {}",
+                tmp_dir.display(),
+                e
+            );
+        } else {
+            info!("Removed temporary directory: {}", tmp_dir.display());
+        }
+
+        info!(
+            "Successfully moved image '{}' to shared pool '{}'",
+            params.image, params.pool
+        );
+
         Ok(())
     }
 
@@ -1926,7 +2112,7 @@ impl VMess {
                     if let Some(tag_name) = pool.rev_tags.get(&image_stem.to_string()) {
                         let tag_prefix_dot = format!("{}.", tag_name);
                         let tag_prefix_percent = format!("{}%", tag_name);
-                        
+
                         // Check if the new name starts with this tag name as prefix
                         if (params.name.starts_with(&tag_prefix_dot)
                             || params.name.starts_with(&tag_prefix_percent))
@@ -2008,7 +2194,12 @@ impl VMess {
         // Get the complete backing chain for the parent image
         let backing_chain = pool
             .get_backing_chain_by_name(&parent.rel_path.file_stem().unwrap().to_string_lossy())
-            .with_context(|| format!("Failed to get backing chain for parent {}", parent.rel_path.display()))?;
+            .with_context(|| {
+                format!(
+                    "Failed to get backing chain for parent {}",
+                    parent.rel_path.display()
+                )
+            })?;
 
         // Ensure all images in the backing chain have symlinks in pool_path
         self.ensure_backing_chain_symlinks(&backing_chain)?;
@@ -2031,8 +2222,7 @@ impl VMess {
             format!(
                 "Failed to create qcow2 image '{}' with backing file '{}'. \
                 Make sure the backing file exists and is accessible.",
-                new_disp,
-                backing_disp
+                new_disp, backing_disp
             )
         })?;
         info!("qemu-image create result: {:?}", v);
@@ -2208,14 +2398,25 @@ impl VMess {
         // Check if this is a frozen image accessed via a tag
         if existing.snap.frozen {
             // For frozen images, we only rename the tag symlink, not the actual frozen file
-            let image_stem = existing.snap.rel_path.file_stem().unwrap().to_string_lossy();
-            
+            let image_stem = existing
+                .snap
+                .rel_path
+                .file_stem()
+                .unwrap()
+                .to_string_lossy();
+
             // Check if the current name is actually a tag
             if let Some(_) = pool.tags.get(&params.name) {
                 // Find and rename the tag symlink
-                let old_tag_path = existing.snap.pool_directory.join(format!("{}.qcow2", params.name));
-                let new_tag_path = existing.snap.pool_directory.join(format!("{}.qcow2", params.new_name));
-                
+                let old_tag_path = existing
+                    .snap
+                    .pool_directory
+                    .join(format!("{}.qcow2", params.name));
+                let new_tag_path = existing
+                    .snap
+                    .pool_directory
+                    .join(format!("{}.qcow2", params.new_name));
+
                 if old_tag_path.exists() && old_tag_path.is_symlink() {
                     // Read the symlink target
                     let target = std::fs::read_link(&old_tag_path).map_err(|e| {
@@ -2224,7 +2425,7 @@ impl VMess {
                             Box::new(e),
                         )
                     })?;
-                    
+
                     // Remove old symlink
                     std::fs::remove_file(&old_tag_path).map_err(|e| {
                         Error::Context(
@@ -2232,7 +2433,7 @@ impl VMess {
                             Box::new(e),
                         )
                     })?;
-                    
+
                     // Create new symlink
                     std::os::unix::fs::symlink(&target, &new_tag_path).map_err(|e| {
                         Error::Context(
@@ -2240,8 +2441,11 @@ impl VMess {
                             Box::new(e),
                         )
                     })?;
-                    
-                    info!("Renamed tag '{}' to '{}' for frozen image", params.name, params.new_name);
+
+                    info!(
+                        "Renamed tag '{}' to '{}' for frozen image",
+                        params.name, params.new_name
+                    );
                     return Ok(());
                 } else {
                     return Err(Error::FreeText(format!(
@@ -2260,7 +2464,7 @@ impl VMess {
         // Handle non-frozen images
         let existing_image_path = existing.snap.get_absolute_path();
         let pool_directory = &existing.snap.pool_directory;
-        
+
         // Check if image exists in tmp_path
         let tmp_image_path = self.config.tmp_path.join(&existing.snap.rel_path);
         if tmp_image_path.exists() {
@@ -2269,20 +2473,27 @@ impl VMess {
             let new_tmp_path = self.config.tmp_path.join(&new_base_name);
             let old_link_path = self.config.pool_path.join(&existing.snap.rel_path);
             let new_link_path = self.config.pool_path.join(&new_base_name);
-            
+
             // Rename the actual file in tmp
             std::fs::rename(&tmp_image_path, &new_tmp_path).map_err(|e| {
                 Error::Context(
-                    format!("rename tmp file: {} -> {}", tmp_image_path.display(), new_tmp_path.display()),
+                    format!(
+                        "rename tmp file: {} -> {}",
+                        tmp_image_path.display(),
+                        new_tmp_path.display()
+                    ),
                     Box::new(e),
                 )
             })?;
-            
+
             // Remove old symlink
             std::fs::remove_file(&old_link_path).map_err(|e| {
-                Error::Context(format!("remove old symlink {}", old_link_path.display()), Box::new(e))
+                Error::Context(
+                    format!("remove old symlink {}", old_link_path.display()),
+                    Box::new(e),
+                )
             })?;
-            
+
             // Create new symlink
             let _ = std::fs::remove_file(&new_link_path); // Remove if exists
             std::os::unix::fs::symlink(&new_tmp_path, &new_link_path).map_err(|e| {
@@ -2295,10 +2506,14 @@ impl VMess {
             // Handle images in their actual pool directory
             let new_base_name = format!("{}.qcow2", params.new_name);
             let new_image_path = pool_directory.join(&new_base_name);
-            
+
             std::fs::rename(&existing_image_path, &new_image_path).map_err(|e| {
                 Error::Context(
-                    format!("rename: {} -> {}", existing_image_path.display(), new_image_path.display()),
+                    format!(
+                        "rename: {} -> {}",
+                        existing_image_path.display(),
+                        new_image_path.display()
+                    ),
                     Box::new(e),
                 )
             })?;
