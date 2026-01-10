@@ -231,7 +231,7 @@ pub struct Rename {
     pub new_name: String,
 
     /// Force rename even for images in shared pools
-    #[structopt(name = "force", short = "f")]
+    #[structopt(long = "force", short = "f")]
     pub force: bool,
 }
 
@@ -1185,10 +1185,21 @@ impl VMess {
 
             // Skip frozen images that have no tags pointing to them unless --all is specified
             if image.frozen && !params.all {
-                if !pool.rev_tags.contains_key(&image_name) {
+                if !pool.rev_tags.contains_key(&image_stem.to_string()) {
                     continue;
                 }
             }
+
+            // For frozen images, use the tag name if available, otherwise use the image name
+            let display_name = if image.frozen {
+                if let Some(tag_name) = pool.rev_tags.get(&image_stem.to_string()) {
+                    tag_name.clone()
+                } else {
+                    image_name
+                }
+            } else {
+                image_name
+            };
 
             by_image(
                 &columns,
@@ -1196,7 +1207,7 @@ impl VMess {
                 &mut table,
                 &pool,
                 image,
-                image_name,
+                display_name,
                 &filter_expr,
             );
         }
@@ -2155,38 +2166,100 @@ impl VMess {
             )));
         }
 
-        // Generate new filename based on the new name
-        let new_base_name = PathBuf::from(format!("{}.qcow2", params.new_name));
-        let existing = &existing.image_path();
+        // Check if this is a frozen image accessed via a tag
+        if existing.snap.frozen {
+            // For frozen images, we only rename the tag symlink, not the actual frozen file
+            let image_stem = existing.snap.rel_path.file_stem().unwrap().to_string_lossy();
+            
+            // Check if the current name is actually a tag
+            if let Some(_) = pool.tags.get(&params.name) {
+                // Find and rename the tag symlink
+                let old_tag_path = existing.snap.pool_directory.join(format!("{}.qcow2", params.name));
+                let new_tag_path = existing.snap.pool_directory.join(format!("{}.qcow2", params.new_name));
+                
+                if old_tag_path.exists() && old_tag_path.is_symlink() {
+                    // Read the symlink target
+                    let target = std::fs::read_link(&old_tag_path).map_err(|e| {
+                        Error::Context(
+                            format!("read symlink {}", old_tag_path.display()),
+                            Box::new(e),
+                        )
+                    })?;
+                    
+                    // Remove old symlink
+                    std::fs::remove_file(&old_tag_path).map_err(|e| {
+                        Error::Context(
+                            format!("remove tag symlink {}", old_tag_path.display()),
+                            Box::new(e),
+                        )
+                    })?;
+                    
+                    // Create new symlink
+                    std::os::unix::fs::symlink(&target, &new_tag_path).map_err(|e| {
+                        Error::Context(
+                            format!("create new tag symlink {}", new_tag_path.display()),
+                            Box::new(e),
+                        )
+                    })?;
+                    
+                    info!("Renamed tag '{}' to '{}' for frozen image", params.name, params.new_name);
+                    return Ok(());
+                } else {
+                    return Err(Error::FreeText(format!(
+                        "Cannot rename frozen image {} - no tag symlink found",
+                        params.name
+                    )));
+                }
+            } else {
+                return Err(Error::FreeText(format!(
+                    "Cannot rename frozen image {} directly. Frozen images can only be renamed via tags",
+                    params.name
+                )));
+            }
+        }
 
-        let tmp_image_path = self.config.tmp_path.join(existing);
+        // Handle non-frozen images
+        let existing_image_path = existing.snap.get_absolute_path();
+        let pool_directory = &existing.snap.pool_directory;
+        
+        // Check if image exists in tmp_path
+        let tmp_image_path = self.config.tmp_path.join(&existing.snap.rel_path);
         if tmp_image_path.exists() {
-            let new_adv = self.config.tmp_path.join(&new_base_name);
-            let image_path = self.config.tmp_path.join(existing);
+            // Handle images in tmp directory with symlinks
+            let new_base_name = format!("{}.qcow2", params.new_name);
+            let new_tmp_path = self.config.tmp_path.join(&new_base_name);
+            let old_link_path = self.config.pool_path.join(&existing.snap.rel_path);
             let new_link_path = self.config.pool_path.join(&new_base_name);
-            let old_link_path = self.config.pool_path.join(existing);
-            std::fs::rename(&image_path, &new_adv).map_err(|e| {
+            
+            // Rename the actual file in tmp
+            std::fs::rename(&tmp_image_path, &new_tmp_path).map_err(|e| {
                 Error::Context(
-                    format!("rename: {} -> {}", image_path.display(), new_adv.display()),
+                    format!("rename tmp file: {} -> {}", tmp_image_path.display(), new_tmp_path.display()),
                     Box::new(e),
                 )
             })?;
+            
+            // Remove old symlink
             std::fs::remove_file(&old_link_path).map_err(|e| {
-                Error::Context(format!("remove {}", old_link_path.display()), Box::new(e))
+                Error::Context(format!("remove old symlink {}", old_link_path.display()), Box::new(e))
             })?;
-            let _ = std::fs::remove_file(&new_link_path);
-            std::os::unix::fs::symlink(&new_adv, &new_link_path).map_err(|e| {
+            
+            // Create new symlink
+            let _ = std::fs::remove_file(&new_link_path); // Remove if exists
+            std::os::unix::fs::symlink(&new_tmp_path, &new_link_path).map_err(|e| {
                 Error::Context(
-                    format!("symlink {} creation", new_adv.display()),
+                    format!("create new symlink {}", new_link_path.display()),
                     Box::new(e),
                 )
             })?;
         } else {
-            let new_adv = self.config.pool_path.join(&new_base_name);
-            let image_path = self.config.pool_path.join(existing);
-            std::fs::rename(&image_path, &new_adv).map_err(|e| {
+            // Handle images in their actual pool directory
+            let new_base_name = format!("{}.qcow2", params.new_name);
+            let new_image_path = pool_directory.join(&new_base_name);
+            
+            std::fs::rename(&existing_image_path, &new_image_path).map_err(|e| {
                 Error::Context(
-                    format!("rename: {} -> {}", image_path.display(), new_adv.display()),
+                    format!("rename: {} -> {}", existing_image_path.display(), new_image_path.display()),
                     Box::new(e),
                 )
             })?;
