@@ -1427,6 +1427,14 @@ impl VMess {
         std::fs::rename(&image_path, &frozen_path)
             .with_context(|| format!("Failed to rename image to frozen filename"))?;
 
+        // Create a tag symlink to the frozen image
+        let tag_symlink_path = existing.snap.pool_directory.join(format!("{}.qcow2", params.name));
+        if let Err(e) = std::os::unix::fs::symlink(&frozen_name, &tag_symlink_path) {
+            warn!("Failed to create tag symlink: {}", e);
+        } else {
+            info!("Created tag '{}' pointing to frozen image", params.name);
+        }
+
         info!(
             "Successfully frozen image {} with hash {}",
             params.name,
