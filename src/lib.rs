@@ -629,10 +629,9 @@ impl Pool {
                 return Ok(chain);
             }
         }
-        
+
         Err(Error::NotFound(name.to_owned()))
     }
-
 
     fn strip_frozen_from_name(&self, name: &str) -> String {
         strip_frozen_suffix(name).to_string()
