@@ -885,8 +885,22 @@ impl VMess {
                 let target_path = image.get_absolute_path();
                 let symlink_path = self.config.pool_path.join(&image.rel_path);
 
-                if !symlink_path.exists() {
-                    std::fs::create_dir_all(&self.config.pool_path)?;
+                let needs_creation = if symlink_path.is_symlink() {
+                    // Check if it's a symlink and if it points to the correct target
+                    match std::fs::read_link(&symlink_path) {
+                        Ok(current_target) => current_target != target_path,
+                        Err(_) => {
+                            // Not a symlink or can't read it, remove and recreate
+                            std::fs::remove_file(&symlink_path).ok();
+                            true
+                        }
+                    }
+                } else {
+                    true
+                };
+
+                if needs_creation {
+                    std::fs::create_dir_all(&image.pool_directory)?;
                     std::os::unix::fs::symlink(&target_path, &symlink_path).with_context(|| {
                         format!(
                             "Failed to create symlink from {} to {}",
