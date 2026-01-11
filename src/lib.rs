@@ -414,6 +414,9 @@ pub enum CommandMode {
 
     /// Update SSH config based on DHCP of client VMs
     UpdateSsh(UpdateSshParams),
+
+    /// No command
+    Nop,
 }
 
 enum UpdateSshDisposition {
@@ -429,6 +432,15 @@ pub struct CommandArgs {
 
     #[structopt(subcommand)]
     command: CommandMode,
+}
+
+impl Default for CommandArgs {
+    fn default() -> Self {
+        Self {
+            config: Default::default(),
+            command: CommandMode::Nop,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -605,7 +617,7 @@ pub struct Pool {
     rev_tags: HashMap<String, String>, // image_name -> tag_name
 }
 
-struct GetInfo<'a> {
+pub struct GetInfo<'a> {
     image: &'a Image,
     vm: Option<&'a VM>,
 }
@@ -617,7 +629,7 @@ impl<'a> GetInfo<'a> {
 }
 
 impl Pool {
-    fn get_by_name<'a>(&'a self, name: &str) -> Result<GetInfo<'a>, Error> {
+    pub fn get_by_name<'a>(&'a self, name: &str) -> Result<GetInfo<'a>, Error> {
         // Check if name is a tag, and use the image name if it is
         let lookup_name = if let Some(image_name) = self.tags.get(name) {
             image_name.as_str()
@@ -2840,6 +2852,10 @@ pub fn get_vm_image_path(image: impl AsRef<str>) -> Result<PathBuf, Error> {
     let pool = vmess.get_pool_no_vms()?;
     let info = pool.get_by_name(image.as_ref())?;
     return Ok(info.image.get_absolute_path());
+}
+
+pub fn get_pool() -> Result<Pool, Error> {
+    VMess::command(&Default::default())?.get_pool_no_vms()
 }
 
 pub fn command(command: CommandMode) -> Result<(), Error> {
