@@ -155,6 +155,9 @@ pub struct Fork {
     #[structopt(name = "force", short = "f")]
     pub force: bool,
 
+    #[structopt(long = "print-parent")]
+    pub print_parent: bool,
+
     #[structopt(flatten)]
     pub overrides: Overrides,
 }
@@ -661,8 +664,15 @@ impl Pool {
         Err(Error::NotFound(name.to_owned()))
     }
 
-    fn strip_frozen_from_name(&self, name: &str) -> String {
-        strip_frozen_suffix(name).to_string()
+    fn name_from_tag(&self, image: &Image) -> String {
+        if image.frozen {
+            let image_stem = image.rel_path.file_stem().unwrap().to_string_lossy();
+            if let Some(tag_name) = self.rev_tags.get(&image_stem.to_string()) {
+                return tag_name.clone();
+            }
+        }
+
+        return strip_qcow2_suffix(&image.rel_path.to_string_lossy().into_owned());
     }
 }
 
@@ -2098,42 +2108,16 @@ impl VMess {
         let new_full_name = params.name.clone();
 
         // Find the longest existing image for which the new name is a prefix
-        let target_prefix_dot = format!("{}.", params.name);
-        let target_prefix_percent = format!("{}%", params.name);
-
         let parent = {
             let mut longest_match: Option<&Image> = None;
             let mut longest_length = 0;
 
             for image in pool.get_all_images() {
-                // Get the image name without frozen suffix for comparison
-                let image_path_str = image.rel_path.to_string_lossy();
-                let image_name = pool.strip_frozen_from_name(&image_path_str);
-
-                // Check if either target prefix matches this image name
-                if (image_name.starts_with(&target_prefix_dot)
-                    || image_name.starts_with(&target_prefix_percent))
-                    && image_name.len() > longest_length
-                {
-                    longest_match = Some(image);
-                    longest_length = image_name.len();
-                }
-
-                // Also check against tag names for frozen images
-                if image.frozen {
-                    let image_stem = image.rel_path.file_stem().unwrap().to_string_lossy();
-                    if let Some(tag_name) = pool.rev_tags.get(&image_stem.to_string()) {
-                        let tag_prefix_dot = format!("{}.", tag_name);
-                        let tag_prefix_percent = format!("{}%", tag_name);
-
-                        // Check if the new name starts with this tag name as prefix
-                        if (params.name.starts_with(&tag_prefix_dot)
-                            || params.name.starts_with(&tag_prefix_percent))
-                            && tag_name.len() > longest_length
-                        {
-                            longest_match = Some(image);
-                            longest_length = tag_name.len();
-                        }
+                let prefix_name = format!("{}.", pool.name_from_tag(image).replace("%", "."));
+                if new_full_name.starts_with(&prefix_name) {
+                    if prefix_name.len() > longest_length {
+                        longest_length = prefix_name.len();
+                        longest_match = Some(image);
                     }
                 }
             }
@@ -2141,6 +2125,11 @@ impl VMess {
             longest_match
                 .ok_or_else(|| Error::NotFound(format!("No matching parent for {}", params.name)))?
         };
+
+        if params.print_parent {
+            println!("Parent: {:?}", parent.rel_path);
+            return Ok(());
+        }
 
         let new_base_name = PathBuf::from(format!("{}.qcow2", params.name));
         let new_adv = self.config.pool_path.join(&new_base_name);
@@ -2568,7 +2557,7 @@ impl VMess {
             for image in pool.get_all_images() {
                 let image_path_str = image.rel_path.to_string_lossy();
                 let image_name = strip_frozen_suffix(&image_path_str).replace('%', ".");
-                
+
                 for pattern in params.names.iter() {
                     let regex = Regex::new(pattern)?;
                     if regex.is_match(&image_name) {
