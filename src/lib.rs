@@ -517,15 +517,7 @@ impl ImageCollection {
         self.images.get(key)
     }
 
-    fn get_mut(&mut self, key: &str) -> Option<&mut Image> {
-        self.images.get_mut(key)
-    }
-
-    fn entry(&mut self, key: String) -> std::collections::btree_map::Entry<'_, String, Image> {
-        self.images.entry(key)
-    }
-
-    fn iter(&self) -> std::collections::btree_map::Iter<'_, String, Image> {
+    fn iter_direct_sub(&self) -> std::collections::btree_map::Iter<'_, String, Image> {
         self.images.iter()
     }
 
@@ -620,12 +612,6 @@ pub struct Pool {
 pub struct GetInfo<'a> {
     image: &'a Image,
     vm: Option<&'a VM>,
-}
-
-impl<'a> GetInfo<'a> {
-    fn image_path(&self) -> &'a PathBuf {
-        &self.image.rel_path
-    }
 }
 
 impl Pool {
@@ -869,6 +855,7 @@ impl VMess {
             CommandMode::UpdateSsh(params) => {
                 self.update_ssh(params)?;
             }
+            CommandMode::Nop => {}
         }
 
         Ok(())
@@ -1287,7 +1274,7 @@ impl VMess {
             prefix: &str,
             _is_last: bool,
         ) {
-            let images: Vec<_> = image_collection.iter().collect();
+            let images: Vec<_> = image_collection.iter_direct_sub().collect();
 
             for (i, (_name, image)) in images.iter().enumerate() {
                 let is_last_item = i == images.len() - 1;
@@ -2409,15 +2396,6 @@ impl VMess {
 
         // Check if this is a frozen image accessed via a tag
         if existing.image.frozen {
-            // For frozen images, we only rename the tag symlink, not the actual frozen file
-            let image_stem = existing
-                .image
-                .rel_path
-                .file_stem()
-                .unwrap()
-                .to_string_lossy();
-
-            // Check if the current name is actually a tag
             if let Some(_) = pool.tags.get(&params.name) {
                 // Find and rename the tag symlink
                 let old_tag_path = existing

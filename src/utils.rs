@@ -277,6 +277,7 @@ pub(crate) fn get_qcow2_backing_chain(
     Ok(BackingChainInfo { chain })
 }
 
+#[allow(unused)] // TODO
 pub(crate) fn write_qcow2_backing_file(
     qcow2_path: &Path,
     backing_file_name: Option<&str>,
