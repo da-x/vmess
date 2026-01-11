@@ -496,7 +496,7 @@ pub(crate) fn strip_qcow2_suffix(filename: &str) -> String {
 }
 
 #[derive(Debug, Default)]
-struct ImageCollection {
+pub struct ImageCollection {
     images: BTreeMap<String, Image>,
 }
 
@@ -573,7 +573,7 @@ impl ImageCollection {
 }
 
 #[derive(Debug)]
-struct Image {
+pub struct Image {
     rel_path: PathBuf,
     pool_directory: PathBuf,
     vm_info: VMInfo,
@@ -606,13 +606,13 @@ pub struct Pool {
 }
 
 struct GetInfo<'a> {
-    snap: &'a Image,
+    image: &'a Image,
     vm: Option<&'a VM>,
 }
 
 impl<'a> GetInfo<'a> {
     fn image_path(&self) -> &'a PathBuf {
-        &self.snap.rel_path
+        &self.image.rel_path
     }
 }
 
@@ -628,7 +628,7 @@ impl Pool {
         for try_name in [lookup_name.to_owned(), lookup_name.replace(".", "%")] {
             if let Some(image) = self.images.find_by_name(&try_name) {
                 return Ok(GetInfo {
-                    snap: image,
+                    image,
                     vm: if let Some(vm_name) = &image.vm_using {
                         self.vms.get(vm_name)
                     } else {
@@ -1371,13 +1371,13 @@ impl VMess {
         let existing = pool.get_by_name(&params.name)?;
 
         // Check if already frozen
-        if existing.snap.frozen {
+        if existing.image.frozen {
             info!("Image {} is already frozen", params.name);
             return Ok(());
         }
 
         // Check if there are subimages
-        if !existing.snap.sub.is_empty() {
+        if !existing.image.sub.is_empty() {
             return Err(Error::HasSubImages(params.name.clone(), "freeze"));
         }
 
@@ -1428,9 +1428,9 @@ impl VMess {
             }
         }
 
-        let image_path = existing.snap.get_absolute_path();
+        let image_path = existing.image.get_absolute_path();
         let image_name_stem = existing
-            .snap
+            .image
             .rel_path
             .file_stem()
             .unwrap()
@@ -1447,7 +1447,7 @@ impl VMess {
         let hash_hex = if should_copy_while_running {
             // Copy image to temporary file first
             let temp_path = existing
-                .snap
+                .image
                 .pool_directory
                 .join(format!(".tmp-freeze.{}.qcow2.tmp", image_name_stem));
             info!("Creating temporary copy for running VM");
@@ -1491,7 +1491,7 @@ impl VMess {
 
         // Create new frozen filename
         let frozen_name = format!("{}@@{}.qcow2", image_name_stem, hash_hex);
-        let frozen_path = existing.snap.pool_directory.join(&frozen_name);
+        let frozen_path = existing.image.pool_directory.join(&frozen_name);
 
         info!("Freezing {} -> {}", params.name, frozen_name);
 
@@ -1501,7 +1501,7 @@ impl VMess {
 
         // Create a tag symlink to the frozen image
         let tag_symlink_path = existing
-            .snap
+            .image
             .pool_directory
             .join(format!("{}.qcow2", params.name));
         if let Err(e) = std::os::unix::fs::symlink(&frozen_name, &tag_symlink_path) {
@@ -1542,8 +1542,8 @@ impl VMess {
         }
 
         // Check that the image is in the main pool or tmp pool (not in a shared pool)
-        let is_in_main_pool = existing.snap.pool_directory == self.config.pool_path;
-        let is_in_tmp_pool = existing.snap.pool_directory == self.config.tmp_path;
+        let is_in_main_pool = existing.image.pool_directory == self.config.pool_path;
+        let is_in_tmp_pool = existing.image.pool_directory == self.config.tmp_path;
 
         if !is_in_main_pool && !is_in_tmp_pool {
             return Err(Error::FreeText(format!(
@@ -1573,8 +1573,8 @@ impl VMess {
         info!("Created temporary directory: {}", tmp_dir.display());
 
         // Move the specific image to temporary directory
-        let source_path = existing.snap.get_absolute_path();
-        let tmp_path = tmp_dir.join(&existing.snap.rel_path);
+        let source_path = existing.image.get_absolute_path();
+        let tmp_path = tmp_dir.join(&existing.image.rel_path);
 
         info!("Moving {} to temporary location", source_path.display());
 
@@ -1593,7 +1593,7 @@ impl VMess {
         }
 
         // Move file from temporary directory to final location
-        let final_path = target_pool.path.join(&existing.snap.rel_path);
+        let final_path = target_pool.path.join(&existing.image.rel_path);
 
         // Ensure parent directory exists
         if let Some(parent) = final_path.parent() {
@@ -1612,7 +1612,7 @@ impl VMess {
 
         // Recreate tag symlinks in target pool if they exist
         let image_stem = existing
-            .snap
+            .image
             .rel_path
             .file_stem()
             .unwrap()
@@ -1621,7 +1621,7 @@ impl VMess {
             let new_tag_path = target_pool.path.join(format!("{}.qcow2", tag_name));
 
             // Create symlink in target pool
-            if let Err(e) = std::os::unix::fs::symlink(&existing.snap.rel_path, &new_tag_path) {
+            if let Err(e) = std::os::unix::fs::symlink(&existing.image.rel_path, &new_tag_path) {
                 warn!("Failed to create tag symlink in target pool: {}", e);
             } else {
                 info!("Created tag '{}' in target pool", tag_name);
@@ -1636,7 +1636,7 @@ impl VMess {
         // Remove original tag symlink
         if let Some(tag_name) = pool.rev_tags.get(&image_stem.to_string()) {
             let old_tag_path = existing
-                .snap
+                .image
                 .pool_directory
                 .join(format!("{}.qcow2", tag_name));
             if old_tag_path.is_symlink() {
@@ -1912,12 +1912,12 @@ impl VMess {
         let pool = self.get_pool()?;
 
         let to_bring_up = pool.get_by_name(&params.full)?;
-        if !to_bring_up.snap.sub.is_empty() {
+        if !to_bring_up.image.sub.is_empty() {
             return Err(Error::HasSubImages(params.full.clone(), ""));
         }
 
         // Check if image is frozen - cannot spawn frozen (read-only) images
-        if to_bring_up.snap.frozen {
+        if to_bring_up.image.frozen {
             return Err(Error::FreeText(format!(
                 "Cannot spawn {} - image is frozen (read-only)",
                 params.full
@@ -1937,7 +1937,7 @@ impl VMess {
         self.ensure_backing_chain_symlinks(&backing_chain)?;
 
         // Use the symlink path in pool_path for the VM configuration
-        let vm_disk_path = self.config.pool_path.join(&to_bring_up.snap.rel_path);
+        let vm_disk_path = self.config.pool_path.join(&to_bring_up.image.rel_path);
         let to_bring_up_image_path = vm_disk_path.display();
 
         if vm_disk_path.metadata()?.permissions().readonly() {
@@ -2137,7 +2137,7 @@ impl VMess {
         if let Ok(existing) = pool.get_by_name(&new_full_name) {
             if params.force {
                 if let Some(vm) = &existing.vm {
-                    info!("Removing VM (state {:?})", existing.snap.sub.get("State"));
+                    info!("Removing VM (state {:?})", existing.image.sub.get("State"));
                     let vmname_prefix = self.get_vm_prefix();
                     let r1 = ibash_stdout!("virsh destroy {vmname_prefix}{vm.name}");
                     let r2 = ibash_stdout!("virsh undefine --nvram {vmname_prefix}{vm.name}");
@@ -2308,7 +2308,7 @@ impl VMess {
         let pool = self.get_pool()?;
 
         let existing = pool.get_by_name(&params.name)?;
-        if !existing.snap.sub.is_empty() {
+        if !existing.image.sub.is_empty() {
             return Err(Error::HasSubImages(params.name.clone(), "start"));
         }
 
@@ -2386,7 +2386,7 @@ impl VMess {
             .config
             .pools
             .iter()
-            .any(|pool| pool.shared && existing.snap.pool_directory == pool.path);
+            .any(|pool| pool.shared && existing.image.pool_directory == pool.path);
 
         if is_in_shared_pool && !params.force {
             return Err(Error::FreeText(format!(
@@ -2396,10 +2396,10 @@ impl VMess {
         }
 
         // Check if this is a frozen image accessed via a tag
-        if existing.snap.frozen {
+        if existing.image.frozen {
             // For frozen images, we only rename the tag symlink, not the actual frozen file
             let image_stem = existing
-                .snap
+                .image
                 .rel_path
                 .file_stem()
                 .unwrap()
@@ -2409,11 +2409,11 @@ impl VMess {
             if let Some(_) = pool.tags.get(&params.name) {
                 // Find and rename the tag symlink
                 let old_tag_path = existing
-                    .snap
+                    .image
                     .pool_directory
                     .join(format!("{}.qcow2", params.name));
                 let new_tag_path = existing
-                    .snap
+                    .image
                     .pool_directory
                     .join(format!("{}.qcow2", params.new_name));
 
@@ -2462,16 +2462,16 @@ impl VMess {
         }
 
         // Handle non-frozen images
-        let existing_image_path = existing.snap.get_absolute_path();
-        let pool_directory = &existing.snap.pool_directory;
+        let existing_image_path = existing.image.get_absolute_path();
+        let pool_directory = &existing.image.pool_directory;
 
         // Check if image exists in tmp_path
-        let tmp_image_path = self.config.tmp_path.join(&existing.snap.rel_path);
+        let tmp_image_path = self.config.tmp_path.join(&existing.image.rel_path);
         if tmp_image_path.exists() {
             // Handle images in tmp directory with symlinks
             let new_base_name = format!("{}.qcow2", params.new_name);
             let new_tmp_path = self.config.tmp_path.join(&new_base_name);
-            let old_link_path = self.config.pool_path.join(&existing.snap.rel_path);
+            let old_link_path = self.config.pool_path.join(&existing.image.rel_path);
             let new_link_path = self.config.pool_path.join(&new_base_name);
 
             // Rename the actual file in tmp
@@ -2711,7 +2711,7 @@ impl VMess {
             let address = address.trim().to_owned();
             if address.len() > 0 {
                 let username = if let Ok(image) = pool.get_by_name(short_vmname) {
-                    if let Some(username) = &image.snap.vm_info.username {
+                    if let Some(username) = &image.image.vm_info.username {
                         Some(username.as_str())
                     } else {
                         None
@@ -2837,8 +2837,9 @@ pub fn get_vm_image_path(image: impl AsRef<str>) -> Result<PathBuf, Error> {
     };
 
     let vmess = VMess::command(&opt)?;
-    let pool_path = &vmess.config.pool_path;
-    return Ok(pool_path.join(format!("{}.qcow2", image.as_ref().replace(".", "%"))));
+    let pool = vmess.get_pool_no_vms()?;
+    let info = pool.get_by_name(image.as_ref())?;
+    return Ok(info.image.get_absolute_path());
 }
 
 pub fn command(command: CommandMode) -> Result<(), Error> {
