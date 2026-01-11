@@ -2560,28 +2560,43 @@ impl VMess {
     fn kill(&mut self, params: Kill) -> Result<(), Error> {
         let pool = self.get_pool()?;
 
-        // Create a matcher function that handles both regex and exact match
-        let matcher = |s: &str| -> Result<bool, Error> {
-            if params.regex {
-                for name in params.names.iter() {
-                    let regex = Regex::new(name)?;
-                    if regex.is_match(s) {
-                        return Ok(true);
-                    }
-                }
-            } else {
-                for name in params.names.iter() {
-                    if name == s {
-                        return Ok(true);
+        // Collect images to kill - handle regex and exact match differently
+        let mut images_to_kill = Vec::new();
+
+        if params.regex {
+            // For regex mode, match against display names
+            for image in pool.get_all_images() {
+                let image_path_str = image.rel_path.to_string_lossy();
+                let image_name = strip_frozen_suffix(&image_path_str).replace('%', ".");
+                
+                for pattern in params.names.iter() {
+                    let regex = Regex::new(pattern)?;
+                    if regex.is_match(&image_name) {
+                        images_to_kill.push(image);
+                        break;
                     }
                 }
             }
-            Ok(false)
-        };
+        } else {
+            // For exact match mode, use the same logic as rename command
+            for name in params.names.iter() {
+                match pool.get_by_name(name) {
+                    Ok(info) => {
+                        images_to_kill.push(info.image);
+                    }
+                    Err(Error::NotFound(_)) => {
+                        if !params.dry_run {
+                            eprintln!("Warning: Image '{}' not found", name);
+                        }
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
 
-        // Get all images and process them
-        for image in pool.get_all_images() {
-            // Generate display name for this image
+        // Process the found images
+        for image in images_to_kill {
+            // Generate display name for output
             let image_path_str = image.rel_path.to_string_lossy();
             let image_name = strip_frozen_suffix(&image_path_str).replace('%', ".");
 
@@ -2590,10 +2605,6 @@ impl VMess {
             } else {
                 None
             };
-
-            if !matcher(&image_name)? {
-                continue;
-            }
 
             if params.dry_run {
                 println!("{}", image_name);
