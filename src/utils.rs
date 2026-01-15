@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 
 use super::Error;
 use log::debug;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug)]
 pub(crate) struct BackingChainInfo {
@@ -33,7 +33,7 @@ pub(crate) fn bash_stdout(cmd: String) -> Result<String, Error> {
     Ok(String::from_utf8(out.stdout)?)
 }
 
-fn make_ssh() -> Command {
+pub(crate) fn make_ssh() -> Command {
     let mut cmd = Command::new("ssh");
     cmd.arg("-o");
     cmd.arg("StrictHostKeyChecking=no");
@@ -380,4 +380,13 @@ where
     let mut contents = String::new();
     file.read_to_string(&mut contents)?;
     Ok(serde_json::de::from_str(&contents)?)
+}
+
+pub(crate) fn write_json_path<T>(json_path: impl AsRef<Path>, value: &T) -> Result<(), Error>
+where
+    T: Serialize,
+{
+    let contents = serde_json::to_string_pretty(value)?;
+    std::fs::write(json_path.as_ref(), contents)?;
+    Ok(())
 }

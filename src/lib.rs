@@ -34,8 +34,9 @@ use crate::utils::calculate_hash;
 use crate::utils::get_qcow2_backing_chain;
 use crate::utils::is_version_at_least;
 use crate::utils::read_json_path;
+use crate::utils::write_json_path;
 use crate::utils::AddExtension;
-use crate::utils::{adjust_path_by_env, remote_shell_no_stderr};
+use crate::utils::{adjust_path_by_env, make_ssh, remote_shell_no_stderr};
 use fstrings::*;
 
 use crate::query::{MatchInfo, VMState};
@@ -157,6 +158,22 @@ pub struct Fork {
 
     #[structopt(long = "print-parent")]
     pub print_parent: bool,
+
+    /// Explicitly specify the parent image name instead of using longest prefix matching
+    #[structopt(long = "parent")]
+    pub parent: Option<String>,
+
+    /// Script to execute on the VM after boot
+    #[structopt(long = "script")]
+    pub script: Option<String>,
+
+    /// Text to be written to the changes JSON file
+    #[structopt(long = "changes")]
+    pub changes: Option<String>,
+
+    /// Skip creation if sub-image with same name and changes already exists
+    #[structopt(long = "cached")]
+    pub cached: bool,
 
     #[structopt(flatten)]
     pub overrides: Overrides,
@@ -2129,14 +2146,25 @@ impl VMess {
     fn fork(&mut self, params: Fork) -> Result<(), Error> {
         let pool = self.get_pool()?;
 
+        // Validate script/changes parameters
+        if params.script.is_some() && params.changes.is_none() {
+            return Err(Error::FreeText(
+                "When --script is specified, --changes must also be specified".to_string(),
+            ));
+        }
+
         if let Some(base_template) = &params.base_template {
             let _xml = self.get_template(&base_template)?;
         }
 
         let new_full_name = params.name.clone();
 
-        // Find the longest existing image for which the new name is a prefix
-        let parent = {
+        // Find the parent image: either explicitly specified or longest prefix match
+        let parent = if let Some(parent_name) = &params.parent {
+            // Use explicitly specified parent
+            pool.get_by_name(parent_name)?.image
+        } else {
+            // Find the longest existing image for which the new name is a prefix
             let mut longest_match: Option<&Image> = None;
             let mut longest_length = 0;
 
@@ -2165,6 +2193,19 @@ impl VMess {
         // TODO: verify parent is not running
 
         if let Ok(existing) = pool.get_by_name(&new_full_name) {
+            if params.cached {
+                // Check if existing image has the same changes
+                if let Some(changes_text) = &params.changes {
+                    if existing.image.vm_info.changes == vec![changes_text.clone()] {
+                        info!(
+                            "Image {} already exists with the same changes, skipping creation",
+                            new_full_name
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+
             if params.force {
                 if let Some(vm) = &existing.vm {
                     info!("Removing VM (state {:?})", existing.image.sub.get("State"));
@@ -2199,8 +2240,6 @@ impl VMess {
         }
         .join(&new_base_name);
 
-        let new_name_in_pool = &self.config.pool_path.join(&new_base_name);
-        let new_name_in_pool_disp = new_name_in_pool.display();
         let _ = std::fs::remove_file(&new);
 
         let new_disp = new.display();
@@ -2267,7 +2306,7 @@ impl VMess {
         // Resize the image if requested
         if let Some(image_size) = params.overrides.image_size {
             let image_size = format!("{}", image_size).replace(" ", "");
-            let cmd = format!("qemu-img resize {new_name_in_pool_disp} {image_size}");
+            let cmd = format!("qemu-img resize {new_disp} {image_size}");
             println!("{}", cmd);
 
             let v = ibash_stdout!("{}", cmd)?;
@@ -2276,6 +2315,7 @@ impl VMess {
             }
         }
 
+        let base_template_provided = params.base_template.is_some();
         if let Some(template) = params.base_template {
             self.spawn(Spawn {
                 full: params.name.clone(),
@@ -2286,6 +2326,97 @@ impl VMess {
                 overrides: params.overrides.clone(),
             })?;
         }
+
+        // Execute script if provided
+        if let Some(script) = &params.script {
+            let changes_text = params.changes.as_ref().unwrap(); // Safe because we validated this above
+
+            if !base_template_provided {
+                return Err(Error::FreeText(
+                    "Script execution requires --base-template to be specified".to_string(),
+                ));
+            }
+
+            let json_path = new.with_extension("json");
+
+            self.modify_vm_with_script(&params.name, script, changes_text, &json_path)?;
+        }
+
+        Ok(())
+    }
+
+    fn modify_vm_with_script(
+        &mut self,
+        vm_name: &str,
+        script_content: &str,
+        changes_text: &str,
+        json_path: &std::path::Path,
+    ) -> Result<(), Error> {
+        // Wait for VM to boot
+        self.wait(Wait {
+            name: vm_name.to_string(),
+        })?;
+
+        // Write script to temporary file on VM via stdin
+        let temp_script_path = "/tmp/vmess_script.sh";
+        let write_script_cmd = format!("cat > {}", temp_script_path);
+
+        let mut ssh_cmd = make_ssh();
+        let mut child = ssh_cmd
+            .arg(vm_name)
+            .arg(&write_script_cmd)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .with_context(|| "Failed to spawn SSH process".to_string())?;
+
+        if let Some(stdin) = child.stdin.as_mut() {
+            std::io::Write::write_all(stdin, script_content.as_bytes())
+                .with_context(|| "Failed to write script content to SSH stdin".to_string())?;
+        }
+
+        let output = child
+            .wait_with_output()
+            .with_context(|| "Failed to complete script write to VM".to_string())?;
+
+        if !output.status.success() {
+            return Err(Error::FreeText(format!(
+                "Failed to write script to VM: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+
+        // Make script executable and run it
+        let exec_cmd = format!("chmod +x {} && {}", temp_script_path, temp_script_path);
+        let mut ssh_cmd = make_ssh();
+        let status = ssh_cmd
+            .arg(vm_name)
+            .arg(&exec_cmd)
+            .status()
+            .with_context(|| "Failed to execute script on VM".to_string())?;
+
+        if !status.success() {
+            return Err(Error::FreeText(format!(
+                "Script execution failed with exit code: {:?}",
+                status.code()
+            )));
+        }
+
+        // Shutdown VM and wait for it to stop
+        self.shutdown_wait(ShutdownWait {
+            name: vm_name.to_string(),
+        })?;
+
+        // Write changes JSON file
+        let vm_info = VMInfo {
+            username: None,
+            changes: vec![changes_text.to_string()],
+        };
+
+        write_json_path(json_path, &vm_info).with_context(|| {
+            format!("Failed to write changes JSON file: {}", json_path.display())
+        })?;
 
         Ok(())
     }
