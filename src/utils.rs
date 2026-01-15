@@ -4,6 +4,7 @@ use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use super::Error;
 use log::debug;
@@ -22,7 +23,6 @@ pub(crate) struct StoredLayer {
 }
 
 pub(crate) fn bash_stdout(cmd: String) -> Result<String, Error> {
-    use std::process::Command;
     debug!("bash output: {:?}", cmd.trim());
     let out = Command::new("bash").arg("-c").arg(&cmd).output()?;
     if !out.status.success() {
@@ -31,6 +31,38 @@ pub(crate) fn bash_stdout(cmd: String) -> Result<String, Error> {
         );
     }
     Ok(String::from_utf8(out.stdout)?)
+}
+
+fn make_ssh() -> Command {
+    let mut cmd = Command::new("ssh");
+    cmd.arg("-o");
+    cmd.arg("StrictHostKeyChecking=no");
+    cmd.arg("-o");
+    cmd.arg("ServerAliveInterval=30");
+    cmd.arg("-o");
+    cmd.arg("ServerAliveCountMax=5");
+    cmd.arg("-o");
+    cmd.arg("TCPKeepAlive=yes");
+    cmd.arg("-o");
+    cmd.arg("UserKnownHostsFile=/dev/null");
+    cmd.arg("-t");
+    cmd
+}
+
+pub(crate) fn remote_shell_no_stderr(hostname: &String, cmd: String) -> Result<(), Error> {
+    let status = make_ssh()
+        .stderr(Stdio::null())
+        .arg(hostname)
+        .arg(&cmd)
+        .output()?;
+    if !status.status.success() {
+        return Err(Error::CommandError(
+            cmd,
+            String::from_utf8_lossy(&status.stderr).as_ref().to_owned(),
+        )
+        .into());
+    }
+    Ok(())
 }
 
 pub(crate) fn adjust_path_by_env(path: PathBuf) -> PathBuf {

@@ -30,12 +30,12 @@ mod utils;
 #[allow(unused_parens)]
 mod query;
 
-use crate::utils::adjust_path_by_env;
 use crate::utils::calculate_hash;
 use crate::utils::get_qcow2_backing_chain;
 use crate::utils::is_version_at_least;
 use crate::utils::read_json_path;
 use crate::utils::AddExtension;
+use crate::utils::{adjust_path_by_env, remote_shell_no_stderr};
 use fstrings::*;
 
 use crate::query::{MatchInfo, VMState};
@@ -163,6 +163,12 @@ pub struct Fork {
 }
 
 #[derive(Debug, StructOpt, Clone, Default)]
+pub struct Wait {
+    /// Full name of the domain
+    pub name: String,
+}
+
+#[derive(Debug, StructOpt, Clone, Default)]
 pub struct New {
     /// Full name of the domain
     pub name: String,
@@ -181,6 +187,9 @@ pub struct VMInfo {
     // Override default username for VM access
     #[serde(default)]
     pub username: Option<String>,
+
+    #[serde(default)]
+    pub changes: Vec<String>,
 }
 
 #[derive(Debug, StructOpt, Clone, Default)]
@@ -372,6 +381,9 @@ pub enum CommandMode {
     /// Fork a new VM out of a suspended VM image and optionally spawn it
     /// if a template definition is provided
     Fork(Fork),
+
+    /// Wait a VM to become available
+    Wait(Wait),
 
     /// Check for an existence of a VM image
     Exists(Exists),
@@ -595,6 +607,8 @@ impl VMInfo {
         if let Some(username) = &vm_info.username {
             self.username = Some(username.clone())
         }
+
+        self.changes.extend(vm_info.changes.clone());
     }
 }
 
@@ -828,6 +842,9 @@ impl VMess {
             }
             CommandMode::Fork(params) => {
                 self.fork(params)?;
+            }
+            CommandMode::Wait(params) => {
+                self.wait(params)?;
             }
             CommandMode::New(params) => {
                 self.new_image(params)?;
@@ -2093,6 +2110,17 @@ impl VMess {
 
         for name in &params.names {
             ibash_stdout!("virsh undefine --nvram {vmname_prefix}{name}")?;
+        }
+
+        Ok(())
+    }
+
+    fn wait(&mut self, params: Wait) -> Result<(), Error> {
+        info!("Waiting boot of {}", params.name);
+
+        while let Err(_) = remote_shell_no_stderr(&params.name, format!("echo -n")) {
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+            self.update_ssh(UpdateSshParams { quiet: true })?;
         }
 
         Ok(())
