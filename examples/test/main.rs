@@ -113,6 +113,7 @@ fn main_wrap() -> Result<()> {
     fork_with_modification(&mut vmess)?;
     try_freeze_rocky_8(&mut vmess)?;
     squash_modified_to_rocky_8_s(&mut vmess)?;
+    tree_images(&mut vmess)?;
     cleanup_vms_in_test_dir(&test_dir)?;
 
     Ok(())
@@ -174,6 +175,20 @@ fn squash_modified_to_rocky_8_s(vmess: &mut vmess::VMess) -> Result<()> {
     vmess.squash(squash_params)?;
 
     log::info!("Successfully created rocky-8-s from modified");
+    Ok(())
+}
+
+fn tree_images(vmess: &mut vmess::VMess) -> Result<()> {
+    use vmess::Tree;
+
+    log::info!("Running vmess tree");
+
+    let tree_params = Tree {
+        filter: vec![],
+    };
+
+    vmess.tree(tree_params)?;
+
     Ok(())
 }
 

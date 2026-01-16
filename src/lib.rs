@@ -1342,7 +1342,7 @@ impl VMess {
         Ok(())
     }
 
-    fn tree(&mut self, params: Tree) -> Result<(), Error> {
+    pub fn tree(&mut self, params: Tree) -> Result<(), Error> {
         let pool = self
             .get_pool()
             .with_context(|| format!("during get_pool"))?;
@@ -1405,13 +1405,20 @@ impl VMess {
                         String::new()
                     };
 
+                    let changes_info = if !image.vm_info.changes.is_empty() {
+                        format!(" [changes: {}]", image.vm_info.changes.join(", "))
+                    } else {
+                        String::new()
+                    };
+
                     println!(
-                        "{}{}{}{}{}{}",
+                        "{}{}{}{}{}{}{}",
                         current_prefix,
                         image_name,
                         tag_info,
                         format!(" ({})", disk_size),
                         vm_info,
+                        changes_info,
                         frozen_indicator
                     );
                 }
