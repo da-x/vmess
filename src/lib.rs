@@ -2558,6 +2558,11 @@ impl VMess {
             name: vm_name.to_string(),
         })?;
 
+        // Undefine the VM after shutdown
+        self.undefine(Undefine {
+            names: vec![vm_name.to_string()],
+        })?;
+
         // Write changes JSON file
         let vm_info = VMInfo {
             username: None,

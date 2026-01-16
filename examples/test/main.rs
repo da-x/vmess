@@ -117,6 +117,8 @@ fn main_wrap() -> Result<()> {
     freeze_rocky_8_s(&mut vmess)?;
     fork_modified_b_from_rocky_8_s(&mut vmess)?;
     tree_images(&mut vmess)?;
+    freeze_modified_b(&mut vmess)?;
+    recreate_modified_b_cached(&mut vmess)?;
     cleanup_vms_in_test_dir(&test_dir)?;
 
     Ok(())
@@ -228,6 +230,56 @@ fn fork_modified_b_from_rocky_8_s(vmess: &mut vmess::VMess) -> Result<()> {
     vmess.fork(fork_params)?;
 
     log::info!("Successfully created modified-b from rocky-8-s");
+    Ok(())
+}
+
+fn freeze_modified_b(vmess: &mut vmess::VMess) -> Result<()> {
+    use vmess::Freeze;
+
+    log::info!("Freezing modified-b image");
+
+    let freeze_params = Freeze {
+        name: "modified-b".to_string(),
+        force: Some("stop-undefine".to_string()),
+    };
+
+    vmess.freeze(freeze_params)?;
+
+    log::info!("Successfully froze modified-b");
+    Ok(())
+}
+
+fn recreate_modified_b_cached(vmess: &mut vmess::VMess) -> Result<()> {
+    use vmess::Fork;
+    use std::time::Instant;
+
+    log::info!("Attempting to recreate modified-b (should be cached and fast)");
+
+    let start_time = Instant::now();
+
+    let fork_params = Fork {
+        name: "modified-b".to_string(),
+        base_template: Some("main".to_string()),
+        force: true,
+        parent: Some("rocky-8-s".to_string()),
+        script: Some("echo 'Additional modification in B' | sudo tee /usr/bin/mod-b".to_string()),
+        changes: Some("Added modification B".to_string()),
+        cached: true,
+        ..Default::default()
+    };
+
+    vmess.fork(fork_params)?;
+
+    let elapsed = start_time.elapsed();
+    
+    log::info!("Recreation completed in {:.3} seconds", elapsed.as_secs_f64());
+
+    if elapsed.as_secs_f64() < 0.1 {
+        log::info!("✅ Fast recreation confirmed - cached result used");
+    } else {
+        log::warn!("⚠️  Recreation took longer than expected - may not have used cache");
+    }
+
     Ok(())
 }
 
