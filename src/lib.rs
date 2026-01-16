@@ -29,6 +29,7 @@ mod utils;
 
 #[allow(unused_parens)]
 mod query;
+mod virsh;
 
 use crate::utils::calculate_hash;
 use crate::utils::get_qcow2_backing_chain;
@@ -37,6 +38,7 @@ use crate::utils::read_json_path;
 use crate::utils::write_json_path;
 use crate::utils::AddExtension;
 use crate::utils::{adjust_path_by_env, make_ssh, remote_shell_no_stderr};
+use crate::virsh::{get_batch_block_info, get_batch_network_info};
 use fstrings::*;
 
 use crate::query::{MatchInfo, VMState};
@@ -994,7 +996,7 @@ impl VMess {
 
             // Get block information for all VMs in one call
             let block_info = if !vm_names.is_empty() {
-                Self::get_batch_block_info(&vm_names)?
+                get_batch_block_info(&vm_names)?
             } else {
                 HashMap::new()
             };
@@ -2867,6 +2869,9 @@ impl VMess {
 
         let mut config = String::new();
 
+        // Get network information for all VMs in batch
+        let vm_to_ip = get_batch_network_info()?;
+
         let vmname_prefix = self.get_vm_prefix();
         for line in ibash_stdout!("virsh list --name")?.lines() {
             let vmname = line.trim();
@@ -2879,13 +2884,8 @@ impl VMess {
                 continue;
             };
 
-            let address = ibash_stdout!(
-                r#"virsh domifaddr {vmname} | grep ipv4 \
-                | awk '{{print $4}}' | awk -F/ '{{print $1}}' | tail -n 1"#
-            )?;
-
-            let address = address.trim().to_owned();
-            if address.len() > 0 {
+            // Use pre-collected network information
+            if let Some(address) = vm_to_ip.get(vmname) {
                 let username = if let Ok(image) = pool.get_by_name(short_vmname) {
                     if let Some(username) = &image.image.vm_info.username {
                         Some(username.as_str())
@@ -2900,7 +2900,7 @@ impl VMess {
                 host_config.insert(
                     short_vmname.to_owned(),
                     HostEntry {
-                        hostname: Some(address.trim().to_owned()),
+                        hostname: Some(address.clone()),
                         user: Some(username.to_owned()),
                     },
                 );
@@ -2962,45 +2962,6 @@ impl VMess {
         Ok(UpdateSshDisposition::Updated)
     }
 
-
-    fn get_batch_block_info(vm_names: &[String]) -> Result<HashMap<String, Vec<String>>, Error> {
-        let mut result = HashMap::new();
-        
-        if vm_names.is_empty() {
-            return Ok(result);
-        }
-
-        // Run virsh domstats --block on all VMs at once
-        let vm_list = vm_names.join(" ");
-        let output = ibash_stdout!("virsh domstats --block {vm_list}")?;
-        
-        let mut current_domain = String::new();
-        
-        for line in output.lines() {
-            let line = line.trim();
-            
-            // Parse domain line: Domain: 'vmname'
-            if line.starts_with("Domain: '") && line.ends_with("'") {
-                current_domain = line[9..line.len()-1].to_string();
-                continue;
-            }
-            
-            // Parse block device path: block.0.path=/var/lib/libvirt/images/mstest1.qcow2
-            if line.starts_with("block.") && line.contains(".path=") {
-                if let Some(eq_pos) = line.find('=') {
-                    let path = &line[eq_pos + 1..];
-                    if !path.is_empty() && !current_domain.is_empty() {
-                        result.entry(current_domain.clone())
-                            .or_insert_with(Vec::new)
-                            .push(path.to_string());
-                    }
-                }
-            }
-        }
-        
-        Ok(result)
-    }
-
     fn load_extra_domain_info_with_block_data(
         files_to_domains: &mut HashMap<PathBuf, String>,
         short_vmname: &str,
@@ -3031,7 +2992,7 @@ impl VMess {
             attrs: Default::default(),
             name: short_vmname.to_owned(),
         };
-        
+
         for line in ibash_stdout!("virsh dominfo {vmname}")?.lines() {
             if let Some(cap) = DOM_PROP.captures(&line) {
                 let key = cap.get(1).unwrap().as_str();
@@ -3039,7 +3000,7 @@ impl VMess {
                 vm.attrs.insert(key.to_owned(), value.to_owned());
             }
         }
-        
+
         pool.vms.insert(short_vmname.to_owned(), vm);
         Ok(())
     }
