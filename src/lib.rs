@@ -384,6 +384,15 @@ pub struct Freeze {
     pub force: Option<String>,
 }
 
+#[derive(Debug, StructOpt, Clone, Default)]
+pub struct Squash {
+    /// Source image name to squash
+    pub source: String,
+
+    /// Destination image name
+    pub destination: String,
+}
+
 #[derive(Debug, StructOpt, Clone)]
 pub struct Move {
     /// Name of the shared pool to move the image to
@@ -445,6 +454,9 @@ pub enum CommandMode {
 
     /// Move an image and its backing chain to a shared pool
     Move(Move),
+
+    /// Squash an image into a new independent qcow2
+    Squash(Squash),
 
     /// Update SSH config based on DHCP of client VMs
     UpdateSsh(UpdateSshParams),
@@ -897,6 +909,9 @@ impl VMess {
             }
             CommandMode::Undefine(params) => {
                 self.undefine(params)?;
+            }
+            CommandMode::Squash(params) => {
+                self.squash(params)?;
             }
             CommandMode::UpdateSsh(params) => {
                 self.update_ssh(params)?;
@@ -1583,6 +1598,98 @@ impl VMess {
             params.name,
             &hash_hex[..8]
         );
+        Ok(())
+    }
+
+    pub fn squash(&mut self, params: Squash) -> Result<(), Error> {
+        use crate::utils::get_qcow2_backing_chain;
+        use log::{info, warn};
+        
+        let pool = self.get_pool()?;
+
+        // Check that the source image exists
+        let source_info = pool.get_by_name(&params.source)?;
+        
+        // Check that destination doesn't already exist
+        if pool.get_by_name(&params.destination).is_ok() {
+            return Err(Error::FreeText(format!(
+                "Destination image '{}' already exists",
+                params.destination
+            )));
+        }
+
+        // Check that there's no tag with the destination name
+        if pool.tags.contains_key(&params.destination) {
+            return Err(Error::FreeText(format!(
+                "Tag '{}' already exists",
+                params.destination
+            )));
+        }
+
+        let source_path = source_info.image.get_absolute_path();
+        let dest_path = source_info.image.pool_directory.join(format!("{}.qcow2", params.destination));
+
+        info!("Squashing {} to {}", source_path.display(), dest_path.display());
+
+        // Use qemu-img convert to create independent qcow2
+        let output = std::process::Command::new("qemu-img")
+            .args(&[
+                "convert",
+                "-m", "16",
+                "-p",
+                "-c",
+                "-W",
+                "-O", "qcow2",
+                &source_path.to_string_lossy(),
+                &dest_path.to_string_lossy(),
+            ])
+            .output()
+            .with_context(|| "Failed to execute qemu-img convert".to_string())?;
+
+        if !output.status.success() {
+            return Err(Error::FreeText(format!(
+                "qemu-img convert failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+
+        // Merge VMInfo from entire backing chain
+        let lookup_paths = vec![source_info.image.pool_directory.clone()];
+        let mut merged_vm_info = VMInfo::default();
+        
+        match get_qcow2_backing_chain(&source_path, &lookup_paths) {
+            Ok(chain_info) => {
+                info!("Merging VMInfo from {} layers in backing chain", chain_info.chain.len());
+                
+                // Merge VMInfo from each layer in the chain (starting from the root)
+                for layer in chain_info.chain.iter().rev() {
+                    let layer_name_raw = layer.basename.file_stem().unwrap().to_string_lossy();
+                    let json_path = layer.real_location.join(format!("{}.json", layer_name_raw));
+                    
+                    if json_path.exists() {
+                        match read_json_path(&json_path) {
+                            Ok(layer_vm_info) => {
+                                info!("Merging VMInfo from layer: {}", layer.basename.display());
+                                merged_vm_info.merge(&layer_vm_info);
+                            }
+                            Err(e) => {
+                                warn!("Failed to read VMInfo from {}: {}", json_path.display(), e);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Failed to get backing chain for {}: {}", source_path.display(), e);
+            }
+        }
+        
+        // Write merged VMInfo to the new squashed image's JSON file
+        let dest_json_path = source_info.image.pool_directory.join(format!("{}.json", params.destination));
+        write_json_path(&dest_json_path, &merged_vm_info)
+            .with_context(|| format!("writing VMInfo to {}", dest_json_path.display()))?;
+
+        info!("Successfully squashed {} to {} with merged VMInfo", params.source, params.destination);
         Ok(())
     }
 

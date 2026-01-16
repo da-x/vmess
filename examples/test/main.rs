@@ -112,6 +112,7 @@ fn main_wrap() -> Result<()> {
     list_images(&mut vmess)?;
     fork_with_modification(&mut vmess)?;
     try_freeze_rocky_8(&mut vmess)?;
+    squash_modified_to_rocky_8_s(&mut vmess)?;
     cleanup_vms_in_test_dir(&test_dir)?;
 
     Ok(())
@@ -157,6 +158,22 @@ fn try_freeze_rocky_8(vmess: &mut vmess::VMess) -> Result<()> {
 
     info!("All good, it failed");
 
+    Ok(())
+}
+
+fn squash_modified_to_rocky_8_s(vmess: &mut vmess::VMess) -> Result<()> {
+    use vmess::Squash;
+
+    log::info!("Squashing 'modified' image to create 'rocky-8-s'");
+
+    let squash_params = Squash {
+        source: "modified".to_string(),
+        destination: "rocky-8-s".to_string(),
+    };
+
+    vmess.squash(squash_params)?;
+
+    log::info!("Successfully created rocky-8-s from modified");
     Ok(())
 }
 
