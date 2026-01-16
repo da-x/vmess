@@ -44,7 +44,7 @@ pub fn init_log(level: log::LevelFilter) -> Result<()> {
             ))
         })
         .level(level)
-        .level_for("ops", log::LevelFilter::Debug)
+        .level_for("vmess", log::LevelFilter::Debug)
         .chain(std::io::stdout())
         .apply()?;
 

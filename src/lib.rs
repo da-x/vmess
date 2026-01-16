@@ -1592,6 +1592,16 @@ impl VMess {
         std::fs::rename(&image_path, &frozen_path)
             .with_context(|| format!("Failed to rename image to frozen filename"))?;
 
+        // Also rename the corresponding JSON file if it exists
+        let json_name = format!("{}.json", image_name_stem);
+        let json_path = existing.image.pool_directory.join(&json_name);
+        if json_path.exists() {
+            let frozen_json_name = format!("{}@@{}.json", image_name_stem, hash_hex);
+            let frozen_json_path = existing.image.pool_directory.join(&frozen_json_name);
+            std::fs::rename(&json_path, &frozen_json_path)
+                .with_context(|| format!("Failed to rename JSON file to frozen filename"))?;
+        }
+
         // Create a tag symlink to the frozen image
         let tag_symlink_path = existing
             .image
