@@ -114,6 +114,9 @@ fn main_wrap() -> Result<()> {
     try_freeze_rocky_8(&mut vmess)?;
     squash_modified_to_rocky_8_s(&mut vmess)?;
     tree_images(&mut vmess)?;
+    freeze_rocky_8_s(&mut vmess)?;
+    fork_modified_b_from_rocky_8_s(&mut vmess)?;
+    tree_images(&mut vmess)?;
     cleanup_vms_in_test_dir(&test_dir)?;
 
     Ok(())
@@ -183,12 +186,48 @@ fn tree_images(vmess: &mut vmess::VMess) -> Result<()> {
 
     log::info!("Running vmess tree");
 
-    let tree_params = Tree {
-        filter: vec![],
-    };
+    let tree_params = Tree { filter: vec![] };
 
     vmess.tree(tree_params)?;
 
+    Ok(())
+}
+
+fn freeze_rocky_8_s(vmess: &mut vmess::VMess) -> Result<()> {
+    use vmess::Freeze;
+
+    log::info!("Freezing rocky-8-s image");
+
+    let freeze_params = Freeze {
+        name: "rocky-8-s".to_string(),
+        force: None,
+    };
+
+    vmess.freeze(freeze_params)?;
+
+    log::info!("Successfully froze rocky-8-s");
+    Ok(())
+}
+
+fn fork_modified_b_from_rocky_8_s(vmess: &mut vmess::VMess) -> Result<()> {
+    use vmess::Fork;
+
+    log::info!("Forking 'modified-b' from 'rocky-8-s'");
+
+    let fork_params = Fork {
+        name: "modified-b".to_string(),
+        base_template: Some("main".to_string()),
+        force: true,
+        parent: Some("rocky-8-s".to_string()),
+        script: Some("echo 'Additional modification in B' | sudo tee /usr/bin/mod-b".to_string()),
+        changes: Some("Added modification B".to_string()),
+        cached: true,
+        ..Default::default()
+    };
+
+    vmess.fork(fork_params)?;
+
+    log::info!("Successfully created modified-b from rocky-8-s");
     Ok(())
 }
 

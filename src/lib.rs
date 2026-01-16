@@ -529,6 +529,9 @@ pub struct SSHConfig {
 
     #[serde(rename = "config-file")]
     pub config_file: PathBuf,
+
+    #[serde(rename = "user", default)]
+    pub user: Option<String>,
 }
 
 pub struct VMess {
@@ -1611,12 +1614,12 @@ impl VMess {
     pub fn squash(&mut self, params: Squash) -> Result<(), Error> {
         use crate::utils::get_qcow2_backing_chain;
         use log::{info, warn};
-        
+
         let pool = self.get_pool()?;
 
         // Check that the source image exists
         let source_info = pool.get_by_name(&params.source)?;
-        
+
         // Check that destination doesn't already exist
         if pool.get_by_name(&params.destination).is_ok() {
             return Err(Error::FreeText(format!(
@@ -1634,19 +1637,28 @@ impl VMess {
         }
 
         let source_path = source_info.image.get_absolute_path();
-        let dest_path = source_info.image.pool_directory.join(format!("{}.qcow2", params.destination));
+        let dest_path = source_info
+            .image
+            .pool_directory
+            .join(format!("{}.qcow2", params.destination));
 
-        info!("Squashing {} to {}", source_path.display(), dest_path.display());
+        info!(
+            "Squashing {} to {}",
+            source_path.display(),
+            dest_path.display()
+        );
 
         // Use qemu-img convert to create independent qcow2
         let output = std::process::Command::new("qemu-img")
             .args(&[
                 "convert",
-                "-m", "16",
+                "-m",
+                "16",
                 "-p",
                 "-c",
                 "-W",
-                "-O", "qcow2",
+                "-O",
+                "qcow2",
                 &source_path.to_string_lossy(),
                 &dest_path.to_string_lossy(),
             ])
@@ -1663,16 +1675,19 @@ impl VMess {
         // Merge VMInfo from entire backing chain
         let lookup_paths = vec![source_info.image.pool_directory.clone()];
         let mut merged_vm_info = VMInfo::default();
-        
+
         match get_qcow2_backing_chain(&source_path, &lookup_paths) {
             Ok(chain_info) => {
-                info!("Merging VMInfo from {} layers in backing chain", chain_info.chain.len());
-                
+                info!(
+                    "Merging VMInfo from {} layers in backing chain",
+                    chain_info.chain.len()
+                );
+
                 // Merge VMInfo from each layer in the chain (starting from the root)
                 for layer in chain_info.chain.iter().rev() {
                     let layer_name_raw = layer.basename.file_stem().unwrap().to_string_lossy();
                     let json_path = layer.real_location.join(format!("{}.json", layer_name_raw));
-                    
+
                     if json_path.exists() {
                         match read_json_path(&json_path) {
                             Ok(layer_vm_info) => {
@@ -1687,16 +1702,26 @@ impl VMess {
                 }
             }
             Err(e) => {
-                warn!("Failed to get backing chain for {}: {}", source_path.display(), e);
+                warn!(
+                    "Failed to get backing chain for {}: {}",
+                    source_path.display(),
+                    e
+                );
             }
         }
-        
+
         // Write merged VMInfo to the new squashed image's JSON file
-        let dest_json_path = source_info.image.pool_directory.join(format!("{}.json", params.destination));
+        let dest_json_path = source_info
+            .image
+            .pool_directory
+            .join(format!("{}.json", params.destination));
         write_json_path(&dest_json_path, &merged_vm_info)
             .with_context(|| format!("writing VMInfo to {}", dest_json_path.display()))?;
 
-        info!("Successfully squashed {} to {} with merged VMInfo", params.source, params.destination);
+        info!(
+            "Successfully squashed {} to {} with merged VMInfo",
+            params.source, params.destination
+        );
         Ok(())
     }
 
@@ -3021,6 +3046,10 @@ impl VMess {
             writeln!(&mut config, r#"Host {}"#, host)?;
             if let Some(user) = &entry.user {
                 writeln!(&mut config, r#"User {}"#, user)?;
+            } else {
+                if let Some(user) = &ssh_config.user {
+                    writeln!(&mut config, r#"User {}"#, user)?;
+                }
             }
             if let Some(hostname) = &entry.hostname {
                 writeln!(&mut config, r#"Hostname {}"#, hostname)?;
