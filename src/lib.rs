@@ -29,7 +29,7 @@ mod utils;
 
 #[allow(unused_parens)]
 mod query;
-mod virsh;
+pub mod virsh;
 
 use crate::utils::calculate_hash;
 use crate::utils::get_qcow2_backing_chain;
@@ -774,7 +774,7 @@ impl VMess {
         Self::new(None, None)
     }
 
-    fn new(config_path: Option<PathBuf>, command: Option<CommandMode>) -> Result<Self, Error> {
+    pub fn new(config_path: Option<PathBuf>, command: Option<CommandMode>) -> Result<Self, Error> {
         let config_path = if let Some(config) = &config_path {
             config.clone()
         } else {
@@ -995,11 +995,7 @@ impl VMess {
             }
 
             // Get block information for all VMs in one call
-            let block_info = if !vm_names.is_empty() {
-                get_batch_block_info(&vm_names)?
-            } else {
-                HashMap::new()
-            };
+            let block_info = get_batch_block_info()?;
 
             // Now process each VM with the pre-collected block information
             for vmname in vm_names {
@@ -1161,7 +1157,7 @@ impl VMess {
         Ok(pool)
     }
 
-    fn list(&mut self, params: List) -> Result<(), Error> {
+    pub fn list(&mut self, params: List) -> Result<(), Error> {
         let pool = self
             .get_pool()
             .with_context(|| format!("during get_pool"))?;
@@ -1432,7 +1428,7 @@ impl VMess {
         Ok(())
     }
 
-    fn freeze(&mut self, params: Freeze) -> Result<(), Error> {
+    pub fn freeze(&mut self, params: Freeze) -> Result<(), Error> {
         use sha2::{Digest, Sha256};
         use std::io::Read;
 
@@ -2158,7 +2154,7 @@ impl VMess {
         Ok(())
     }
 
-    fn fork(&mut self, params: Fork) -> Result<(), Error> {
+    pub fn fork(&mut self, params: Fork) -> Result<(), Error> {
         let pool = self.get_pool()?;
 
         // Validate script/changes parameters

@@ -81,7 +81,6 @@ fn get_dhcp_leases() -> Result<HashMap<MacAddress, IpAddress>, Error> {
 
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() >= 5 {
-            println!("{:?}", parts);
             let mac = parts[2];
             let ip_with_subnet = parts[4];
 
@@ -143,16 +142,11 @@ pub fn get_batch_network_info() -> Result<HashMap<VmName, IpAddress>, Error> {
     Ok(vm_to_ip)
 }
 
-pub fn get_batch_block_info(vm_names: &[VmName]) -> Result<HashMap<VmName, Vec<String>>, Error> {
+// Returns a mapping between existing VMs and their images
+pub fn get_batch_block_info() -> Result<HashMap<VmName, Vec<String>>, Error> {
     let mut result = HashMap::new();
 
-    if vm_names.is_empty() {
-        return Ok(result);
-    }
-
-    // Run virsh domstats --block on all VMs at once
-    let vm_list = vm_names.join(" ");
-    let output = ibash_stdout!("virsh domstats --block {vm_list}")?;
+    let output = ibash_stdout!("virsh domstats --block")?;
 
     let mut current_domain = String::new();
 

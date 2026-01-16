@@ -29,6 +29,8 @@ lalrpop-util = { version = "0.20", features = ["lexer"] }
 strum = "0.17.1"
 strum_macros = "0.17.1"
 byte-unit = "4"
+toml = "0.9.11"
+anyhow = "1.0.100"
 
 [build-dependencies]
 lalrpop = { version = "0.20", features = ["lexer"] }
