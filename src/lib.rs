@@ -975,6 +975,8 @@ impl VMess {
         let vmname_prefix = self.get_vm_prefix();
 
         if with_vm_list {
+            // First, collect all VM names that match our prefix
+            let mut vm_names = Vec::new();
             for line in ibash_stdout!("virsh list --all --name")
                 .with_context(|| format!("during virsh list"))?
                 .lines()
@@ -985,17 +987,28 @@ impl VMess {
                 }
 
                 let vmname = line;
-                let short_vmname = if vmname.starts_with(&vmname_prefix) {
-                    &vmname[vmname_prefix.len()..]
-                } else {
-                    continue;
-                };
+                if vmname.starts_with(&vmname_prefix) {
+                    vm_names.push(vmname.to_string());
+                }
+            }
 
-                match Self::load_extra_domain_info(
+            // Get block information for all VMs in one call
+            let block_info = if !vm_names.is_empty() {
+                Self::get_batch_block_info(&vm_names)?
+            } else {
+                HashMap::new()
+            };
+
+            // Now process each VM with the pre-collected block information
+            for vmname in vm_names {
+                let short_vmname = &vmname[vmname_prefix.len()..];
+
+                match Self::load_extra_domain_info_with_block_data(
                     &mut files_to_domains,
                     short_vmname,
-                    vmname,
+                    &vmname,
                     &mut pool,
+                    block_info.get(&vmname),
                 ) {
                     Ok(_) => {}
                     Err(_) => {
@@ -2949,21 +2962,60 @@ impl VMess {
         Ok(UpdateSshDisposition::Updated)
     }
 
-    fn load_extra_domain_info(
+
+    fn get_batch_block_info(vm_names: &[String]) -> Result<HashMap<String, Vec<String>>, Error> {
+        let mut result = HashMap::new();
+        
+        if vm_names.is_empty() {
+            return Ok(result);
+        }
+
+        // Run virsh domstats --block on all VMs at once
+        let vm_list = vm_names.join(" ");
+        let output = ibash_stdout!("virsh domstats --block {vm_list}")?;
+        
+        let mut current_domain = String::new();
+        
+        for line in output.lines() {
+            let line = line.trim();
+            
+            // Parse domain line: Domain: 'vmname'
+            if line.starts_with("Domain: '") && line.ends_with("'") {
+                current_domain = line[9..line.len()-1].to_string();
+                continue;
+            }
+            
+            // Parse block device path: block.0.path=/var/lib/libvirt/images/mstest1.qcow2
+            if line.starts_with("block.") && line.contains(".path=") {
+                if let Some(eq_pos) = line.find('=') {
+                    let path = &line[eq_pos + 1..];
+                    if !path.is_empty() && !current_domain.is_empty() {
+                        result.entry(current_domain.clone())
+                            .or_insert_with(Vec::new)
+                            .push(path.to_string());
+                    }
+                }
+            }
+        }
+        
+        Ok(result)
+    }
+
+    fn load_extra_domain_info_with_block_data(
         files_to_domains: &mut HashMap<PathBuf, String>,
         short_vmname: &str,
         vmname: &str,
         pool: &mut Pool,
+        block_paths: Option<&Vec<String>>,
     ) -> Result<(), Error> {
         lazy_static! {
-            static ref SOURCE_FILE: Regex = Regex::new(r"^[\t ]+[^ ]+[\t ]+([^']+)$").unwrap();
             static ref DOM_PROP: Regex = Regex::new(r"^([^:]+):[ \t]*([^ \t]+.*)$").unwrap();
         }
 
-        for line in ibash_stdout!("virsh domblklist {vmname}")?.lines() {
-            if let Some(cap) = SOURCE_FILE.captures(&line) {
-                let s = cap.get(1).unwrap().as_str();
-                let path = PathBuf::from(s);
+        // Use pre-collected block information if available
+        if let Some(paths) = block_paths {
+            for path_str in paths {
+                let path = PathBuf::from(path_str);
                 files_to_domains.insert(path.clone(), short_vmname.to_owned());
 
                 // If this is a symlink, also add the target path
@@ -2974,10 +3026,12 @@ impl VMess {
                 }
             }
         }
+
         let mut vm = VM {
             attrs: Default::default(),
             name: short_vmname.to_owned(),
         };
+        
         for line in ibash_stdout!("virsh dominfo {vmname}")?.lines() {
             if let Some(cap) = DOM_PROP.captures(&line) {
                 let key = cap.get(1).unwrap().as_str();
@@ -2985,6 +3039,7 @@ impl VMess {
                 vm.attrs.insert(key.to_owned(), value.to_owned());
             }
         }
+        
         pool.vms.insert(short_vmname.to_owned(), vm);
         Ok(())
     }
