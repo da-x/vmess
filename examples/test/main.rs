@@ -129,6 +129,23 @@ fn remove_all_symlinks_in_directory(dir_path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
+fn remove_node(pool_path: &PathBuf, tag_name: &str) -> Result<()> {
+    let tag_path = pool_path.join(format!("{}.qcow2", tag_name));
+
+    if tag_path.exists() {
+        std::fs::remove_file(&tag_path)?;
+        info!("✅ Removed tag '{}' from {}", tag_name, pool_path.display());
+    } else {
+        info!(
+            "⚠️  Tag '{}' not found in {}",
+            tag_name,
+            pool_path.display()
+        );
+    }
+
+    Ok(())
+}
+
 fn main_wrap() -> Result<()> {
     let args = Args::from_args();
 
@@ -241,7 +258,17 @@ fn main_wrap() -> Result<()> {
     // We are properly caching based on published images, this should return immediately.
     check_cached(|| fork_modified(&mut vmess, "modified-b", "Override modification for B"))?;
 
-    // TODO - If a tag is missing, we still want the fork to be cached if there is a matching image.
+    test_title!("Forking a shared cached image that is tagless");
+
+    // Test that fork caching works even when a tag is missing but matching image exists
+    let shared_pool_path = test_dir.join("shared");
+    remove_node(&shared_pool_path, "published-image")?;
+
+    // Now try to fork with publish again - this should still be cached because
+    // the actual frozen image with matching changes should exist
+    info!("Testing fork with publish on tagless cached image");
+    check_cached(|| fork_with_publish(&mut vmess))?;
+    info!("✅ Fork with publish worked even without tag - cached image found by changes");
 
     cleanup_vms_in_test_dir(&test_dir)?;
 

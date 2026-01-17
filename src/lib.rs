@@ -2530,6 +2530,46 @@ impl VMess {
             }
         }
 
+        // Check for frozen sub-image with same changes before checking existing images
+        if let Some(changes_text) = &params.changes {
+            // Search in parent's sub-images for a frozen image with same changes
+            for (sub_name, sub_image) in &parent.sub.images {
+                if params.cached
+                    && sub_image.frozen
+                    && sub_image.vm_info.changes == vec![changes_text.clone()]
+                {
+                    // Found a frozen sub-image with same changes
+                    let image_name = strip_frozen_suffix(&sub_name).replace('%', ".");
+                    if image_name != params.name {
+                        continue;
+                    }
+
+                    info!(
+                        "Found existing frozen sub-image '{}' with same changes, creating tag '{}' -> '{}'",
+                        sub_name, params.name, sub_name
+                    );
+
+                    // Create tag symlink pointing to the frozen image
+                    let tag_symlink_path =
+                        self.config.pool_path.join(format!("{}.qcow2", params.name));
+                    let frozen_path = format!("{}.qcow2", sub_name);
+
+                    let _ = std::fs::remove_file(&tag_symlink_path);
+                    std::os::unix::fs::symlink(&frozen_path, &tag_symlink_path).with_context(
+                        || {
+                            format!(
+                                "Failed to create tag symlink {} -> {}",
+                                tag_symlink_path.display(),
+                                frozen_path
+                            )
+                        },
+                    )?;
+
+                    return Ok(());
+                }
+            }
+        }
+
         if let Ok(existing) = pool.get_by_name(&new_full_name) {
             if params.cached {
                 // Check if existing image has the same changes
@@ -2566,39 +2606,6 @@ impl VMess {
                 }
             } else {
                 return Err(Error::AlreadyExists);
-            }
-
-            // Check for frozen sub-image with same changes before recreating
-            if let Some(changes_text) = &params.changes {
-                // Search in parent's sub-images for a frozen image with same changes
-                for (_sub_name, sub_image) in &parent.sub.images {
-                    if sub_image.frozen && sub_image.vm_info.changes == vec![changes_text.clone()] {
-                        // Found a frozen sub-image with same changes
-                        let frozen_name = pool.name_from_tag(sub_image);
-                        info!(
-                            "Found existing frozen sub-image '{}' with same changes, creating tag '{}' -> '{}'",
-                            frozen_name, params.name, frozen_name
-                        );
-
-                        // Create tag symlink pointing to the frozen image
-                        let tag_symlink_path =
-                            self.config.pool_path.join(format!("{}.qcow2", params.name));
-                        let frozen_path = format!("{}.qcow2", frozen_name);
-
-                        let _ = std::fs::remove_file(&tag_symlink_path);
-                        std::os::unix::fs::symlink(&frozen_path, &tag_symlink_path).with_context(
-                            || {
-                                format!(
-                                    "Failed to create tag symlink {} -> {}",
-                                    tag_symlink_path.display(),
-                                    frozen_path
-                                )
-                            },
-                        )?;
-
-                        return Ok(());
-                    }
-                }
             }
         }
 
