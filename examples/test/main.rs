@@ -228,6 +228,10 @@ fn main_wrap() -> Result<()> {
 
     tree_images(&mut vmess)?;
 
+    test_title!("Forking a shared cached image");
+    // This overrides the second modification because we did not freeze it.
+    check_cached(|| fork_modified(&mut vmess, "modified-b", "Modification for B"))?;
+
     cleanup_vms_in_test_dir(&test_dir)?;
 
     Ok(())
