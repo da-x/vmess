@@ -108,6 +108,9 @@ pub enum Error {
     #[error("{0}")]
     FreeText(String),
 
+    #[error("{0}")]
+    CallBack(anyhow::Error),
+
     #[error("Invalid pool name: {0}")]
     InvalidPoolName(String),
 }
@@ -986,6 +989,23 @@ impl VMess {
             }
         }
         Ok(())
+    }
+
+    pub fn get_image_prep_lock_path(&self, image: &str) -> Result<PathBuf, Error> {
+        // The VM image does not need to exist. This is used for lock coordination.
+        //
+        // We will create <image>.lock in the shared pool if it is defined, otherwise
+        // we will create it in the main pool.
+        
+        // Use the first shared pool if available, otherwise use main pool
+        let lock_dir = if let Some(shared_pool) = self.config.pools.iter().find(|p| p.shared) {
+            &shared_pool.path
+        } else {
+            &self.config.pool_path
+        };
+        
+        let lock_filename = format!("{}.lock", image);
+        Ok(lock_dir.join(lock_filename))
     }
 
     pub fn get_pool_detailed(&self, with_vm_list: bool) -> Result<Pool, Error> {
@@ -2330,16 +2350,80 @@ impl VMess {
     }
 
     pub fn fork(&mut self, params: Fork) -> Result<(), Error> {
-        let pool = self
-            .get_pool()
-            .with_context(|| "Failed to get pool in fork".to_string())?;
-
         // Validate script/changes parameters
         if params.script.is_some() && params.changes.is_none() {
             return Err(Error::FreeText(
                 "When --script is specified, --changes must also be specified".to_string(),
             ));
         }
+
+        self.fork_with(params.clone(), move |vm_name: &str| -> anyhow::Result<()> {
+            // Execute script if provided
+            if let Some(script) = &params.script {
+                // Write script to temporary file on VM via stdin
+                let temp_script_path = "/tmp/vmess_script.sh";
+                let write_script_cmd = format!("cat > {}", temp_script_path);
+
+                let mut ssh_cmd = make_ssh();
+                let mut child = ssh_cmd
+                    .arg(vm_name)
+                    .arg(&write_script_cmd)
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .with_context(|| "Failed to spawn SSH process".to_string())?;
+
+                if let Some(stdin) = child.stdin.as_mut() {
+                    std::io::Write::write_all(stdin, script.as_bytes()).with_context(|| {
+                        "Failed to write script content to SSH stdin".to_string()
+                    })?;
+                }
+
+                let output = child
+                    .wait_with_output()
+                    .with_context(|| "Failed to complete script write to VM".to_string())?;
+
+                if !output.status.success() {
+                    return Err(Error::FreeText(format!(
+                        "Failed to write script to VM: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ))
+                    .into());
+                }
+
+                // Make script executable and run it
+                let exec_cmd = format!("chmod +x {} && {}", temp_script_path, temp_script_path);
+                let mut ssh_cmd = make_ssh();
+                let status = ssh_cmd
+                    .arg(vm_name)
+                    .arg(&exec_cmd)
+                    .status()
+                    .with_context(|| "Failed to execute script on VM".to_string())?;
+
+                if !status.success() {
+                    return Err(Error::FreeText(format!(
+                        "Script execution failed with exit code: {:?}",
+                        status.code()
+                    ))
+                    .into());
+                }
+            }
+
+            Ok(())
+        })?;
+
+        Ok(())
+    }
+
+    pub fn fork_with(
+        &mut self,
+        params: Fork,
+        f: impl FnOnce(&str) -> anyhow::Result<()>,
+    ) -> Result<(), Error> {
+        let pool = self
+            .get_pool()
+            .with_context(|| "Failed to get pool in fork".to_string())?;
 
         if let Some(base_template) = &params.base_template {
             let _xml = self
@@ -2590,7 +2674,7 @@ impl VMess {
         }
 
         // Execute script if provided
-        if let Some(script) = &params.script {
+        if let Some(_) = &params.script {
             let changes_text = params.changes.as_ref().unwrap(); // Safe because we validated this above
 
             if !base_template_provided {
@@ -2601,89 +2685,36 @@ impl VMess {
 
             let json_path = new.with_extension("json");
 
-            self.modify_vm_with_script(&params.name, script, changes_text, &json_path)?;
+            let vm_name: &str = &params.name;
+            let changes_text: &str = changes_text;
+
+            // Wait for VM to boot
+            self.wait(Wait {
+                name: vm_name.to_string(),
+            })?;
+
+            f(vm_name).map_err(Error::CallBack)?;
+
+            // Shutdown VM and wait for it to stop
+            self.shutdown_wait(ShutdownWait {
+                name: vm_name.to_string(),
+            })?;
+
+            // Undefine the VM after shutdown
+            self.undefine(Undefine {
+                names: vec![vm_name.to_string()],
+            })?;
+
+            // Write changes JSON file
+            let vm_info = VMInfo {
+                username: None,
+                changes: vec![changes_text.to_string()],
+            };
+
+            write_json_path(json_path.clone(), &vm_info).with_context(|| {
+                format!("Failed to write changes JSON file: {}", json_path.display())
+            })?;
         }
-
-        Ok(())
-    }
-
-    fn modify_vm_with_script(
-        &mut self,
-        vm_name: &str,
-        script_content: &str,
-        changes_text: &str,
-        json_path: &std::path::Path,
-    ) -> Result<(), Error> {
-        // Wait for VM to boot
-        self.wait(Wait {
-            name: vm_name.to_string(),
-        })?;
-
-        // Write script to temporary file on VM via stdin
-        let temp_script_path = "/tmp/vmess_script.sh";
-        let write_script_cmd = format!("cat > {}", temp_script_path);
-
-        let mut ssh_cmd = make_ssh();
-        let mut child = ssh_cmd
-            .arg(vm_name)
-            .arg(&write_script_cmd)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .with_context(|| "Failed to spawn SSH process".to_string())?;
-
-        if let Some(stdin) = child.stdin.as_mut() {
-            std::io::Write::write_all(stdin, script_content.as_bytes())
-                .with_context(|| "Failed to write script content to SSH stdin".to_string())?;
-        }
-
-        let output = child
-            .wait_with_output()
-            .with_context(|| "Failed to complete script write to VM".to_string())?;
-
-        if !output.status.success() {
-            return Err(Error::FreeText(format!(
-                "Failed to write script to VM: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )));
-        }
-
-        // Make script executable and run it
-        let exec_cmd = format!("chmod +x {} && {}", temp_script_path, temp_script_path);
-        let mut ssh_cmd = make_ssh();
-        let status = ssh_cmd
-            .arg(vm_name)
-            .arg(&exec_cmd)
-            .status()
-            .with_context(|| "Failed to execute script on VM".to_string())?;
-
-        if !status.success() {
-            return Err(Error::FreeText(format!(
-                "Script execution failed with exit code: {:?}",
-                status.code()
-            )));
-        }
-
-        // Shutdown VM and wait for it to stop
-        self.shutdown_wait(ShutdownWait {
-            name: vm_name.to_string(),
-        })?;
-
-        // Undefine the VM after shutdown
-        self.undefine(Undefine {
-            names: vec![vm_name.to_string()],
-        })?;
-
-        // Write changes JSON file
-        let vm_info = VMInfo {
-            username: None,
-            changes: vec![changes_text.to_string()],
-        };
-
-        write_json_path(json_path, &vm_info).with_context(|| {
-            format!("Failed to write changes JSON file: {}", json_path.display())
-        })?;
 
         Ok(())
     }
@@ -3222,6 +3253,7 @@ impl VMess {
 
         Ok(UpdateSshDisposition::Updated)
     }
+
 }
 
 impl Pool {
