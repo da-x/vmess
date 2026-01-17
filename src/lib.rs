@@ -657,6 +657,9 @@ struct VM {
 pub struct Pool {
     images: ImageCollection,
     vms: BTreeMap<String, VM>,
+
+    // Tag are just name aliases and they are managed by having
+    // symlinks in the pool directory. See 'load_tags'.
     tags: HashMap<String, String>,     // tag_name -> image_name
     rev_tags: HashMap<String, String>, // image_name -> tag_name
 }
@@ -1145,49 +1148,7 @@ impl VMess {
             }
         }
 
-        // Load tags from symlinks within each pool directory
-        for lookup_path in &lookup_paths {
-            for entry in std::fs::read_dir(lookup_path)
-                .with_context(|| format!("reading directory {} for tags", lookup_path.display()))?
-            {
-                let entry = entry.with_context(|| format!("during entry resolve for tags"))?;
-                let path = entry.path();
-
-                // Check if it's a symlink
-                if !path.is_symlink() {
-                    continue;
-                }
-
-                let target = match std::fs::canonicalize(&path) {
-                    Ok(target) => target,
-                    Err(_) => continue,
-                };
-
-                // Check if target is in the same pool (not outside)
-                let target_relative = match target.strip_prefix(lookup_path) {
-                    Ok(rel) => rel,
-                    Err(_) => continue,
-                };
-
-                // Remove .qcow2 suffix from symlink name to get tag name
-                let tag_name = path
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
-
-                // Remove .qcow2 suffix from target name to get image name
-                let image_name = target_relative
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
-
-                // Add to tags maps
-                pool.tags.insert(tag_name.clone(), image_name.clone());
-                pool.rev_tags.insert(image_name, tag_name);
-            }
-        }
+        pool.load_tags(lookup_paths)?;
 
         Ok(pool)
     }
@@ -2411,6 +2372,8 @@ impl VMess {
             } else {
                 return Err(Error::AlreadyExists);
             }
+
+            // TODO: here, we can first check whether there is a frozen sub image that has the same changes. If so, I want to set a tag to it (see Pool's tags).
         }
 
         let new = 'x: {
@@ -3149,6 +3112,53 @@ impl VMess {
         }
 
         Ok(UpdateSshDisposition::Updated)
+    }
+}
+
+impl Pool {
+    fn load_tags(&mut self, lookup_paths: Vec<PathBuf>) -> Result<(), Error> {
+        Ok(for lookup_path in &lookup_paths {
+            for entry in std::fs::read_dir(lookup_path)
+                .with_context(|| format!("reading directory {} for tags", lookup_path.display()))?
+            {
+                let entry = entry.with_context(|| format!("during entry resolve for tags"))?;
+                let path = entry.path();
+
+                // Check if it's a symlink
+                if !path.is_symlink() {
+                    continue;
+                }
+
+                let target = match std::fs::canonicalize(&path) {
+                    Ok(target) => target,
+                    Err(_) => continue,
+                };
+
+                // Check if target is in the same pool (not outside)
+                let target_relative = match target.strip_prefix(lookup_path) {
+                    Ok(rel) => rel,
+                    Err(_) => continue,
+                };
+
+                // Remove .qcow2 suffix from symlink name to get tag name
+                let tag_name = path
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+
+                // Remove .qcow2 suffix from target name to get image name
+                let image_name = target_relative
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+
+                // Add to tags maps
+                self.tags.insert(tag_name.clone(), image_name.clone());
+                self.rev_tags.insert(image_name, tag_name);
+            }
+        })
     }
 }
 
