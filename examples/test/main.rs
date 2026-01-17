@@ -228,6 +228,11 @@ fn main_wrap() -> Result<()> {
 
     tree_images(&mut vmess)?;
 
+    test_title!("Test publish functionality");
+    fork_with_publish(&mut vmess)?;
+    
+    tree_images(&mut vmess)?;
+
     test_title!("Forking a shared cached image");
     // This overrides the second modification because we did not freeze it.
     check_cached(|| fork_modified(&mut vmess, "modified-b", "Modification for B"))?;
@@ -347,6 +352,27 @@ fn freeze(vmess: &mut vmess::VMess, target: &str) -> Result<()> {
     vmess.freeze(freeze_params)?;
 
     log::info!("Successfully froze {target}");
+    Ok(())
+}
+
+fn fork_with_publish(vmess: &mut vmess::VMess) -> Result<()> {
+    log::info!("Testing fork with publish flag");
+    
+    let fork_publish_params = Fork {
+        name: "published-image".to_string(),
+        base_template: Some("main".to_string()),
+        force: true,
+        parent: Some("rocky-8-s".to_string()),
+        script: Some("echo 'Published image modification' | sudo tee /usr/bin/published > /dev/null".to_string()),
+        changes: Some("Published image changes".to_string()),
+        cached: true,
+        publish: true,  // This is the new flag we're testing
+        ..Default::default()
+    };
+
+    vmess.fork(fork_publish_params)?;
+    info!("✅ Fork with publish completed successfully");
+    
     Ok(())
 }
 

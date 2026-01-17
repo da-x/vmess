@@ -180,6 +180,10 @@ pub struct Fork {
     #[structopt(long = "cached")]
     pub cached: bool,
 
+    /// Freeze and move the created image to a shared pool if one exists
+    #[structopt(long = "publish")]
+    pub publish: bool,
+
     #[structopt(flatten)]
     pub overrides: Overrides,
 }
@@ -996,14 +1000,14 @@ impl VMess {
         //
         // We will create <image>.lock in the shared pool if it is defined, otherwise
         // we will create it in the main pool.
-        
+
         // Use the first shared pool if available, otherwise use main pool
         let lock_dir = if let Some(shared_pool) = self.config.pools.iter().find(|p| p.shared) {
             &shared_pool.path
         } else {
             &self.config.pool_path
         };
-        
+
         let lock_filename = format!("{}.lock", image);
         Ok(lock_dir.join(lock_filename))
     }
@@ -1473,7 +1477,7 @@ impl VMess {
         Ok(())
     }
 
-    pub fn freeze(&mut self, params: Freeze) -> Result<(), Error> {
+    pub fn freeze(&self, params: Freeze) -> Result<(), Error> {
         use sha2::{Digest, Sha256};
         use std::io::Read;
 
@@ -1754,7 +1758,7 @@ impl VMess {
         Ok(())
     }
 
-    pub fn move_image(&mut self, params: Move) -> Result<(), Error> {
+    pub fn move_image(&self, params: Move) -> Result<(), Error> {
         use std::process;
 
         let pool = self.get_pool()?;
@@ -2171,7 +2175,7 @@ impl VMess {
         Ok(())
     }
 
-    fn spawn(&mut self, params: Spawn) -> Result<(), Error> {
+    fn spawn(&self, params: Spawn) -> Result<(), Error> {
         let pool = self.get_pool()?;
 
         let to_bring_up = pool.get_by_name(&params.full)?;
@@ -2328,7 +2332,7 @@ impl VMess {
         Ok(())
     }
 
-    fn undefine(&mut self, params: Undefine) -> Result<(), Error> {
+    fn undefine(&self, params: Undefine) -> Result<(), Error> {
         let vmname_prefix = self.get_vm_prefix();
 
         for name in &params.names {
@@ -2338,7 +2342,7 @@ impl VMess {
         Ok(())
     }
 
-    fn wait(&mut self, params: Wait) -> Result<(), Error> {
+    fn wait(&self, params: Wait) -> Result<(), Error> {
         info!("Waiting boot of {}", params.name);
 
         while let Err(_) = remote_shell_no_stderr(&params.name, format!("echo -n")) {
@@ -2417,7 +2421,7 @@ impl VMess {
     }
 
     pub fn fork_with(
-        &mut self,
+        &self,
         params: Fork,
         f: impl FnOnce(&str) -> anyhow::Result<()>,
     ) -> Result<(), Error> {
@@ -2700,10 +2704,12 @@ impl VMess {
                 name: vm_name.to_string(),
             })?;
 
-            // Undefine the VM after shutdown
-            self.undefine(Undefine {
-                names: vec![vm_name.to_string()],
-            })?;
+            if !params.volatile {
+                // Undefine the VM after shutdown
+                self.undefine(Undefine {
+                    names: vec![vm_name.to_string()],
+                })?;
+            }
 
             // Write changes JSON file
             let vm_info = VMInfo {
@@ -2714,6 +2720,36 @@ impl VMess {
             write_json_path(json_path.clone(), &vm_info).with_context(|| {
                 format!("Failed to write changes JSON file: {}", json_path.display())
             })?;
+        }
+
+        // Handle publish flag - freeze and move to shared pool if one exists
+        if params.publish {
+            if let Some(shared_pool) = self.config.pools.iter().find(|p| p.shared) {
+                let shared_pool_name = shared_pool.name.clone();
+                info!(
+                    "Publishing image '{}' to shared pool '{}'",
+                    params.name, shared_pool_name
+                );
+
+                // Freeze the image first
+                self.freeze(Freeze {
+                    name: params.name.clone(),
+                    force: Some("stop-undefine".to_string()),
+                })?;
+
+                // Move to the shared pool
+                self.move_image(Move {
+                    image: params.name.clone(),
+                    pool: shared_pool_name.clone(),
+                })?;
+
+                info!(
+                    "Successfully published '{}' to shared pool '{}'",
+                    params.name, shared_pool_name
+                );
+            } else {
+                info!("Publish requested but no shared pool available - skipping publish");
+            }
         }
 
         Ok(())
@@ -2781,7 +2817,7 @@ impl VMess {
         Ok(())
     }
 
-    fn stop(&mut self, params: Stop) -> Result<(), Error> {
+    fn stop(&self, params: Stop) -> Result<(), Error> {
         let pool = self.get_pool()?;
 
         let vmname_prefix = self.get_vm_prefix();
@@ -2795,7 +2831,7 @@ impl VMess {
         Ok(())
     }
 
-    fn shutdown_wait(&mut self, params: ShutdownWait) -> Result<(), Error> {
+    fn shutdown_wait(&self, params: ShutdownWait) -> Result<(), Error> {
         let pool = self.get_pool()?;
 
         let existing = pool.get_by_name(&params.name)?;
@@ -3103,7 +3139,7 @@ impl VMess {
         Ok(())
     }
 
-    fn update_ssh(&mut self, params: UpdateSshParams) -> Result<UpdateSshDisposition, Error> {
+    fn update_ssh(&self, params: UpdateSshParams) -> Result<UpdateSshDisposition, Error> {
         let mut ssh_config = if let Some(ssh_config) = &self.config.ssh_config {
             ssh_config.clone()
         } else {
@@ -3253,7 +3289,6 @@ impl VMess {
 
         Ok(UpdateSshDisposition::Updated)
     }
-
 }
 
 impl Pool {
