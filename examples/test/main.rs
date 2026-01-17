@@ -1,3 +1,4 @@
+use ansi_term::Style;
 use anyhow::{bail, ensure, Result};
 use log::info;
 use std::process::Command;
@@ -10,6 +11,26 @@ use crate::infra::{
 };
 
 mod infra;
+
+fn get_terminal_width() -> usize {
+    if let Some(size) = termsize::get() {
+        size.cols as usize
+    } else {
+        80 // default fallback
+    }
+}
+
+macro_rules! test_title {
+    ($title:expr) => {
+        let width = get_terminal_width();
+        println!("{}", Style::new().bold().paint("⎯".repeat(width)));
+        info!(
+            "{}",
+            Style::new().bold().paint(format!("=== {} ===", $title))
+        );
+        info!("{}", Style::new().bold().paint(format!("::")));
+    };
+}
 
 fn list_images(vmess: &mut vmess::VMess) -> Result<()> {
     use vmess::List;
@@ -112,14 +133,14 @@ fn main_wrap() -> Result<()> {
 
     list_images(&mut vmess)?;
 
-    info!("Basic parent freeze test");
+    test_title!("Basic parent freeze test");
 
     fork_with_modification(&mut vmess)?;
     check_inability_to_freeze_parent(&mut vmess)?;
     squash_modified_to_rocky_8_s(&mut vmess)?;
     tree_images(&mut vmess)?;
 
-    info!("Check cached freezing");
+    test_title!("Check cached freezing");
 
     freeze_parent(&mut vmess)?;
     fork_modified(&mut vmess, "modified-b", "Modification for B")?;
@@ -130,17 +151,41 @@ fn main_wrap() -> Result<()> {
     check_uncached(|| fork_modified(&mut vmess, "modified-b", "Override modification for B"))?;
     tree_images(&mut vmess)?;
 
-    info!("Freeze the second one");
+    test_title!("Freeze the second one");
     freeze(&mut vmess, "modified-b")?;
     tree_images(&mut vmess)?;
 
-    info!("Retargeting the symlink");
+    test_title!("Retargeting the symlink");
     check_cached(|| fork_modified(&mut vmess, "modified-b", "Modification for B"))?;
     tree_images(&mut vmess)?;
     check_cached(|| fork_modified(&mut vmess, "modified-b", "Override modification for B"))?;
     tree_images(&mut vmess)?;
 
-    info!("Move to shared");
+    test_title!("Move to shared");
+
+    // Test that moving modified-b fails because its parent (rocky-8-s) is not in the shared pool
+    info!("Testing move validation - should fail because parent not in shared pool");
+    ensure!(
+        vmess.move_to("modified-b", "shared").is_err(),
+        "Moving modified-b should fail because its parent rocky-8-s is not in shared pool"
+    );
+    info!("✅ Move validation working correctly - failed as expected");
+
+    // Move rocky-8-s to shared pool first
+    info!("Moving rocky-8-s to shared pool");
+    vmess.move_to("rocky-8-s", "shared")?;
+    info!("✅ Successfully moved rocky-8-s to shared pool");
+
+    // Now move modified-b to shared pool (should work now)
+    info!("Moving modified-b to shared pool");
+    vmess.move_to("modified-b", "shared")?;
+    info!("✅ Successfully moved modified-b to shared pool");
+
+    tree_images(&mut vmess)?;
+
+    test_title!("Forking in main after move to shared");
+    fork_modified(&mut vmess, "modified-b", "Third Modification for B")?;
+    tree_images(&mut vmess)?;
 
     cleanup_vms_in_test_dir(&test_dir)?;
 
@@ -148,7 +193,7 @@ fn main_wrap() -> Result<()> {
 }
 
 fn fork_with_modification(vmess: &mut vmess::VMess) -> Result<()> {
-    log::info!("Running vmess fork with rpm-sign installation");
+    log::info!("Running vmess fork with modifications");
 
     let fork_params = Fork {
         name: "modified".to_string(),
@@ -156,7 +201,7 @@ fn fork_with_modification(vmess: &mut vmess::VMess) -> Result<()> {
         force: true,
         parent: Some("rocky-8".to_string()),
         script: Some(
-            "echo 'This is some modification' | sudo tee /usr/bin/empty-binay".to_string(),
+            "echo 'This is some modification' | sudo tee /usr/bin/empty-binary".to_string(),
         ),
         changes: Some("I've done some modification".to_string()),
         cached: true,

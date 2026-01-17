@@ -1394,6 +1394,7 @@ impl VMess {
                     // Print image info
                     let frozen_indicator = if image.frozen { " [FROZEN]" } else { "" };
                     let disk_size = format!("{:.2} GB", image.size_mb as f32 / 1024.0);
+                    let pool_name = image.get_pool_name(config);
                     let tag_info = if let Some(tag) = pool.rev_tags.get(&image_name.to_string()) {
                         format!(" [tag: {}]", tag)
                     } else {
@@ -1407,11 +1408,12 @@ impl VMess {
                     };
 
                     println!(
-                        "{}{}{}{}{}{}{}",
+                        "{}{}{}{}{}{}{}{}",
                         current_prefix,
                         image_name,
                         tag_info,
                         format!(" ({})", disk_size),
+                        format!(" [pool: {}]", pool_name),
                         vm_info,
                         changes_info,
                         frozen_indicator
@@ -1438,7 +1440,13 @@ impl VMess {
         if !pool.tags.is_empty() {
             println!("\nLoaded Tags:");
             for (tag_name, image_name) in &pool.tags {
-                println!("  {} -> {}", tag_name, image_name);
+                // Find the image to get its pool information
+                if let Ok(image_result) = pool.get_by_name(image_name) {
+                    let pool_name = image_result.image.get_pool_name(&self.config);
+                    println!("  {} -> {} [pool: {}]", tag_name, image_name, pool_name);
+                } else {
+                    println!("  {} -> {}", tag_name, image_name);
+                }
             }
         }
 
@@ -1726,7 +1734,7 @@ impl VMess {
         Ok(())
     }
 
-    fn move_image(&mut self, params: Move) -> Result<(), Error> {
+    pub fn move_image(&mut self, params: Move) -> Result<(), Error> {
         use std::process;
 
         let pool = self.get_pool()?;
@@ -1893,6 +1901,10 @@ impl VMess {
         );
 
         Ok(())
+    }
+
+    pub fn move_to(&mut self, image: &str, pool: &str) -> Result<(), Error> {
+        self.move_image(Move { image: image.to_string(), pool: pool.to_string() })
     }
 
     fn get_template(&self, name: &str) -> Result<Element, Error> {

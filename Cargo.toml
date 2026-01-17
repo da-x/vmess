@@ -31,6 +31,8 @@ strum_macros = "0.17.1"
 byte-unit = "4"
 toml = "0.9.11"
 anyhow = "1.0.100"
+ansi_term = "0.12"
+termsize = "0.1"
 
 [build-dependencies]
 lalrpop = { version = "0.20", features = ["lexer"] }

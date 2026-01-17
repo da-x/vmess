@@ -1179,6 +1179,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "termsize"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f11ff5c25c172608d5b85e2fb43ee9a6d683a7f4ab7f96ae07b3d8b590368fd"
+dependencies = [
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "textwrap"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1335,6 +1345,7 @@ checksum = "49874b5167b65d7193b8aba1567f5c7d93d001cafc34600cee003eda787e483f"
 name = "vmess"
 version = "0.1.0"
 dependencies = [
+ "ansi_term",
  "anyhow",
  "byte-unit",
  "chrono",
@@ -1357,6 +1368,7 @@ dependencies = [
  "strum",
  "strum_macros",
  "tempdir",
+ "termsize",
  "thiserror",
  "toml 0.9.11+spec-1.1.0",
  "users",
