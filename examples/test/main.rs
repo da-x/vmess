@@ -1,4 +1,4 @@
-use anyhow::{ensure, Result};
+use anyhow::{bail, ensure, Result};
 use log::info;
 use std::process::Command;
 use std::{path::PathBuf, time::Instant};
@@ -119,12 +119,29 @@ fn main_wrap() -> Result<()> {
     squash_modified_to_rocky_8_s(&mut vmess)?;
     tree_images(&mut vmess)?;
 
+    info!("Check cached freezing");
+
     freeze_parent(&mut vmess)?;
-    fork_modified_b(&mut vmess)?;
+    fork_modified(&mut vmess, "modified-b", "Modification for B")?;
     tree_images(&mut vmess)?;
 
-    freeze_modified_b(&mut vmess)?;
-    recreate_modified_b_cached(&mut vmess)?;
+    freeze(&mut vmess, "modified-b")?;
+    check_cached(|| fork_modified(&mut vmess, "modified-b", "Modification for B"))?;
+    check_uncached(|| fork_modified(&mut vmess, "modified-b", "Override modification for B"))?;
+    tree_images(&mut vmess)?;
+
+    info!("Freeze the second one");
+    freeze(&mut vmess, "modified-b")?;
+    tree_images(&mut vmess)?;
+
+    info!("Retargeting the symlink");
+    check_cached(|| fork_modified(&mut vmess, "modified-b", "Modification for B"))?;
+    tree_images(&mut vmess)?;
+    check_cached(|| fork_modified(&mut vmess, "modified-b", "Override modification for B"))?;
+    tree_images(&mut vmess)?;
+
+    info!("Move to shared");
+
     cleanup_vms_in_test_dir(&test_dir)?;
 
     Ok(())
@@ -207,72 +224,84 @@ fn freeze_parent(vmess: &mut vmess::VMess) -> Result<()> {
     Ok(())
 }
 
-fn fork_modified_b(vmess: &mut vmess::VMess) -> Result<()> {
-    log::info!("Forking 'modified-b' from 'rocky-8-s'");
+fn fork_modified(vmess: &mut vmess::VMess, target: &str, modtext: &str) -> Result<()> {
+    log::info!("Forking '{target}' from 'rocky-8-s', modtext: {modtext}");
 
     let fork_params = Fork {
-        name: "modified-b".to_string(),
+        name: target.to_string(),
         base_template: Some("main".to_string()),
         force: true,
         parent: Some("rocky-8-s".to_string()),
-        script: Some("echo 'Additional modification in B' | sudo tee /usr/bin/mod-b".to_string()),
-        changes: Some("Added modification B".to_string()),
+        script: Some(
+            "echo 'Additional modification in B' | sudo tee /usr/bin/mod-b > /dev/null".to_string(),
+        ),
+        changes: Some(modtext.to_string()),
         cached: true,
         ..Default::default()
     };
 
     vmess.fork(fork_params)?;
 
-    log::info!("Successfully created modified-b from rocky-8-s");
+    log::info!("Successfully created {target} from rocky-8-s");
     Ok(())
 }
 
-fn freeze_modified_b(vmess: &mut vmess::VMess) -> Result<()> {
-    log::info!("Freezing modified-b image");
+fn freeze(vmess: &mut vmess::VMess, target: &str) -> Result<()> {
+    log::info!("Freezing {target} image");
 
     let freeze_params = Freeze {
-        name: "modified-b".to_string(),
+        name: target.to_string(),
         force: Some("stop-undefine".to_string()),
     };
 
     vmess.freeze(freeze_params)?;
 
-    log::info!("Successfully froze modified-b");
+    log::info!("Successfully froze {target}");
     Ok(())
 }
 
-fn recreate_modified_b_cached(vmess: &mut vmess::VMess) -> Result<()> {
-    log::info!("Attempting to recreate modified-b (should be cached and fast)");
-
+fn check_cached<F>(operation: F) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+{
     let start_time = Instant::now();
 
-    let fork_params = Fork {
-        name: "modified-b".to_string(),
-        base_template: Some("main".to_string()),
-        force: true,
-        parent: Some("rocky-8-s".to_string()),
-        script: Some("echo 'Additional modification in B' | sudo tee /usr/bin/mod-b".to_string()),
-        changes: Some("Added modification B".to_string()),
-        cached: true,
-        ..Default::default()
-    };
-
-    vmess.fork(fork_params)?;
+    let result = operation()?;
 
     let elapsed = start_time.elapsed();
+    let elapsed_secs = elapsed.as_secs_f64();
 
-    log::info!(
-        "Recreation completed in {:.3} seconds",
-        elapsed.as_secs_f64()
-    );
+    log::info!("Operation completed in {:.3} seconds", elapsed_secs);
 
-    if elapsed.as_secs_f64() < 0.1 {
-        log::info!("✅ Fast recreation confirmed - cached result used");
+    if elapsed_secs < 0.3 {
+        log::info!("✅ Fast operation confirmed - cached result used");
     } else {
-        log::warn!("⚠️  Recreation took longer than expected - may not have used cache");
+        bail!("⚠️  Operation took longer than expected - may not have used cache");
     }
 
-    Ok(())
+    Ok(result)
+}
+
+fn check_uncached<F>(operation: F) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+{
+    let start_time = Instant::now();
+
+    let result = operation()?;
+
+    let elapsed = start_time.elapsed();
+    let elapsed_secs = elapsed.as_secs_f64();
+
+    log::info!("Operation completed in {:.3} seconds", elapsed_secs);
+
+    if elapsed_secs >= 1.0 {
+        log::info!("✅ Slow operation confirmed - cached result used");
+    } else {
+        bail!("⚠️  Operation took way shortedr than expected");
+    }
+
+    Ok(result)
 }
 
 fn main() {
