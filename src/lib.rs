@@ -2341,7 +2341,20 @@ impl VMess {
         let new_base_name = PathBuf::from(format!("{}.qcow2", params.name));
         let new_adv = self.config.pool_path.join(&new_base_name);
 
-        // TODO: verify parent is not running
+        // Verify parent is not currently running
+        if let Some(vm_using) = &parent.vm_using {
+            if let Some(vm) = pool.vms.get(vm_using) {
+                use crate::virsh::VirDomainState;
+                if vm.stats.state != VirDomainState::NoState {
+                    return Err(Error::FreeText(format!(
+                        "Cannot fork from parent '{}' - VM '{}' is in state {:?}.",
+                        pool.name_from_tag(parent),
+                        vm_using,
+                        vm.stats.state,
+                    )));
+                }
+            }
+        }
 
         if let Ok(existing) = pool.get_by_name(&new_full_name) {
             if params.cached {
@@ -2373,7 +2386,38 @@ impl VMess {
                 return Err(Error::AlreadyExists);
             }
 
-            // TODO: here, we can first check whether there is a frozen sub image that has the same changes. If so, I want to set a tag to it (see Pool's tags).
+            // Check for frozen sub-image with same changes before recreating
+            if let Some(changes_text) = &params.changes {
+                // Search in parent's sub-images for a frozen image with same changes
+                for (_sub_name, sub_image) in &parent.sub.images {
+                    if sub_image.frozen && sub_image.vm_info.changes == vec![changes_text.clone()] {
+                        // Found a frozen sub-image with same changes
+                        let frozen_name = pool.name_from_tag(sub_image);
+                        info!(
+                            "Found existing frozen sub-image '{}' with same changes, creating tag '{}' -> '{}'",
+                            frozen_name, params.name, frozen_name
+                        );
+
+                        // Create tag symlink pointing to the frozen image
+                        let tag_symlink_path =
+                            self.config.pool_path.join(format!("{}.qcow2", params.name));
+                        let frozen_path = format!("{}.qcow2", frozen_name);
+
+                        let _ = std::fs::remove_file(&tag_symlink_path);
+                        std::os::unix::fs::symlink(&frozen_path, &tag_symlink_path).with_context(
+                            || {
+                                format!(
+                                    "Failed to create tag symlink {} -> {}",
+                                    tag_symlink_path.display(),
+                                    frozen_path
+                                )
+                            },
+                        )?;
+
+                        return Ok(());
+                    }
+                }
+            }
         }
 
         let new = 'x: {

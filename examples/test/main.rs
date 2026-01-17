@@ -1,8 +1,9 @@
 use anyhow::{ensure, Result};
 use log::info;
-use std::path::PathBuf;
 use std::process::Command;
+use std::{path::PathBuf, time::Instant};
 use structopt::StructOpt;
+use vmess::{Fork, Freeze, Squash, Tree};
 
 use crate::infra::{
     copy_template, copy_vm_image, create_test_config, create_test_directory, parse_ssh_config, Args,
@@ -110,13 +111,18 @@ fn main_wrap() -> Result<()> {
     let mut vmess = vmess::VMess::new(Some(config_path), None)?;
 
     list_images(&mut vmess)?;
+
+    info!("Basic parent freeze test");
+
     fork_with_modification(&mut vmess)?;
-    try_freeze_rocky_8(&mut vmess)?;
+    check_inability_to_freeze_parent(&mut vmess)?;
     squash_modified_to_rocky_8_s(&mut vmess)?;
     tree_images(&mut vmess)?;
-    freeze_rocky_8_s(&mut vmess)?;
-    fork_modified_b_from_rocky_8_s(&mut vmess)?;
+
+    freeze_parent(&mut vmess)?;
+    fork_modified_b(&mut vmess)?;
     tree_images(&mut vmess)?;
+
     freeze_modified_b(&mut vmess)?;
     recreate_modified_b_cached(&mut vmess)?;
     cleanup_vms_in_test_dir(&test_dir)?;
@@ -125,8 +131,6 @@ fn main_wrap() -> Result<()> {
 }
 
 fn fork_with_modification(vmess: &mut vmess::VMess) -> Result<()> {
-    use vmess::Fork;
-
     log::info!("Running vmess fork with rpm-sign installation");
 
     let fork_params = Fork {
@@ -147,9 +151,7 @@ fn fork_with_modification(vmess: &mut vmess::VMess) -> Result<()> {
     Ok(())
 }
 
-fn try_freeze_rocky_8(vmess: &mut vmess::VMess) -> Result<()> {
-    use vmess::Freeze;
-
+fn check_inability_to_freeze_parent(vmess: &mut vmess::VMess) -> Result<()> {
     log::info!("Trying to freeze rocky-8 after it has a subimage");
 
     let freeze_params = Freeze {
@@ -168,8 +170,6 @@ fn try_freeze_rocky_8(vmess: &mut vmess::VMess) -> Result<()> {
 }
 
 fn squash_modified_to_rocky_8_s(vmess: &mut vmess::VMess) -> Result<()> {
-    use vmess::Squash;
-
     log::info!("Squashing 'modified' image to create 'rocky-8-s'");
 
     let squash_params = Squash {
@@ -184,8 +184,6 @@ fn squash_modified_to_rocky_8_s(vmess: &mut vmess::VMess) -> Result<()> {
 }
 
 fn tree_images(vmess: &mut vmess::VMess) -> Result<()> {
-    use vmess::Tree;
-
     log::info!("Running vmess tree");
 
     let tree_params = Tree { filter: vec![] };
@@ -195,9 +193,7 @@ fn tree_images(vmess: &mut vmess::VMess) -> Result<()> {
     Ok(())
 }
 
-fn freeze_rocky_8_s(vmess: &mut vmess::VMess) -> Result<()> {
-    use vmess::Freeze;
-
+fn freeze_parent(vmess: &mut vmess::VMess) -> Result<()> {
     log::info!("Freezing rocky-8-s image");
 
     let freeze_params = Freeze {
@@ -211,9 +207,7 @@ fn freeze_rocky_8_s(vmess: &mut vmess::VMess) -> Result<()> {
     Ok(())
 }
 
-fn fork_modified_b_from_rocky_8_s(vmess: &mut vmess::VMess) -> Result<()> {
-    use vmess::Fork;
-
+fn fork_modified_b(vmess: &mut vmess::VMess) -> Result<()> {
     log::info!("Forking 'modified-b' from 'rocky-8-s'");
 
     let fork_params = Fork {
@@ -234,8 +228,6 @@ fn fork_modified_b_from_rocky_8_s(vmess: &mut vmess::VMess) -> Result<()> {
 }
 
 fn freeze_modified_b(vmess: &mut vmess::VMess) -> Result<()> {
-    use vmess::Freeze;
-
     log::info!("Freezing modified-b image");
 
     let freeze_params = Freeze {
@@ -250,9 +242,6 @@ fn freeze_modified_b(vmess: &mut vmess::VMess) -> Result<()> {
 }
 
 fn recreate_modified_b_cached(vmess: &mut vmess::VMess) -> Result<()> {
-    use vmess::Fork;
-    use std::time::Instant;
-
     log::info!("Attempting to recreate modified-b (should be cached and fast)");
 
     let start_time = Instant::now();
@@ -271,8 +260,11 @@ fn recreate_modified_b_cached(vmess: &mut vmess::VMess) -> Result<()> {
     vmess.fork(fork_params)?;
 
     let elapsed = start_time.elapsed();
-    
-    log::info!("Recreation completed in {:.3} seconds", elapsed.as_secs_f64());
+
+    log::info!(
+        "Recreation completed in {:.3} seconds",
+        elapsed.as_secs_f64()
+    );
 
     if elapsed.as_secs_f64() < 0.1 {
         log::info!("✅ Fast recreation confirmed - cached result used");
