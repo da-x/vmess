@@ -630,6 +630,7 @@ pub struct Image {
     rel_path: PathBuf,
     pool_directory: PathBuf,
     vm_info: VMInfo,
+    merged_vm_info: VMInfo,
     size_mb: u64,
     vm_using: Option<String>,
     sub: ImageCollection,
@@ -747,6 +748,7 @@ impl Image {
             vm_using,
             size_mb: (std::fs::metadata(&abs_path)?.blocks() * 512) / (1024 * 1024),
             vm_info: Default::default(),
+            merged_vm_info: Default::default(),
             rel_path: path.clone(),
             pool_directory: pool_directory.clone(),
             frozen: is_frozen,
@@ -1097,7 +1099,7 @@ impl VMess {
             }
 
             // Process entire chain uniformly, from root (last) to leaf (first)
-            let mut current_vm_info = VMInfo::default();
+            let mut merged_vm_info = VMInfo::default();
 
             let mut current_image = &mut pool.images;
             for layer in chain_info.chain.iter().rev() {
@@ -1107,11 +1109,16 @@ impl VMess {
                 let json_path = layer
                     .real_location
                     .join(PathBuf::from(format!("{}.json", json_base)));
+
+                let current_vm_info;
                 if json_path.exists() {
-                    current_vm_info.merge(&read_json_path(&json_path).with_context(|| {
+                    current_vm_info = read_json_path(&json_path).with_context(|| {
                         format!("during merging of json {}", json_path.display())
-                    })?);
-                }
+                    })?;
+                    merged_vm_info.merge(&current_vm_info);
+                } else {
+                    current_vm_info = Default::default();
+                };
 
                 let key = layer.basename.to_string_lossy().into_owned();
                 let key = strip_qcow2_suffix(&key);
@@ -1127,7 +1134,8 @@ impl VMess {
                                         layer.real_location.join(&layer.basename).display()
                                     )
                                 })?;
-                        image.vm_info = current_vm_info.clone();
+                        image.vm_info = current_vm_info;
+                        image.merged_vm_info = merged_vm_info.clone();
                         v.insert(image)
                     }
                     btree_map::Entry::Occupied(o) => o.into_mut(),
