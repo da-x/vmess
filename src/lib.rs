@@ -1760,6 +1760,26 @@ impl VMess {
             )));
         }
 
+        // Get the backing chain and validate all images are in the target shared pool
+        let backing_chain = pool.get_backing_chain_by_name(&params.image)?;
+        
+        for image in &backing_chain {
+            // Skip the first image (the one we're moving)
+            if image.rel_path == existing.image.rel_path {
+                continue;
+            }
+            
+            // Check if this backing image is already in the target shared pool
+            if image.pool_directory != target_pool.path {
+                return Err(Error::FreeText(format!(
+                    "Cannot move image '{}' because its backing chain image '{}' is not in the target shared pool '{}'. All backing chain images must be in the target shared pool before moving.",
+                    params.image,
+                    image.rel_path.display(),
+                    params.pool
+                )));
+            }
+        }
+
         info!(
             "Moving image '{}' to shared pool '{}'",
             params.image, params.pool
