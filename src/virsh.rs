@@ -9,6 +9,43 @@ pub type MacAddress = String;
 pub type IpAddress = String;
 pub type VmName = String;
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum VirDomainState {
+    NoState = 0,
+    Running = 1,
+    Blocked = 2,
+    Paused = 3,
+    Shutdown = 4,
+    Shutoff = 5,
+    Crashed = 6,
+    PmSuspended = 7,
+    Unknown,
+}
+
+impl From<u32> for VirDomainState {
+    fn from(value: u32) -> Self {
+        match value {
+            0 => VirDomainState::NoState,
+            1 => VirDomainState::Running,
+            2 => VirDomainState::Blocked,
+            3 => VirDomainState::Paused,
+            4 => VirDomainState::Shutdown,
+            5 => VirDomainState::Shutoff,
+            6 => VirDomainState::Crashed,
+            7 => VirDomainState::PmSuspended,
+            _ => VirDomainState::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct KVMStats {
+    pub block_paths: Vec<String>,
+    pub mem_max: Option<u64>,     // balloon.maximum in KiB
+    pub mem_current: Option<u64>, // balloon.rss in KiB
+    pub state: VirDomainState,
+}
+
 fn get_network_interface_info() -> Result<HashMap<InterfaceName, MacAddress>, Error> {
     // Parse: ip -o link show | awk '{ for (i=1; i<=NF; i++) if ($i == "link/ether") { gsub(/:$/, "", $2); print $2, $(i+1) } }'
     // Output: interface_name mac_address
@@ -142,11 +179,11 @@ pub fn get_batch_network_info() -> Result<HashMap<VmName, IpAddress>, Error> {
     Ok(vm_to_ip)
 }
 
-// Returns a mapping between existing VMs and their images
-pub fn get_batch_block_info() -> Result<HashMap<VmName, Vec<String>>, Error> {
+// Returns a mapping between existing VMs and their comprehensive stats
+pub fn get_all_stats() -> Result<HashMap<VmName, KVMStats>, Error> {
     let mut result = HashMap::new();
 
-    let output = ibash_stdout!("virsh domstats --block")?;
+    let output = ibash_stdout!("virsh domstats")?;
 
     let mut current_domain = String::new();
 
@@ -156,18 +193,57 @@ pub fn get_batch_block_info() -> Result<HashMap<VmName, Vec<String>>, Error> {
         // Parse domain line: Domain: 'vmname'
         if line.starts_with("Domain: '") && line.ends_with("'") {
             current_domain = line[9..line.len() - 1].to_string();
+            // Initialize KVMStats for this domain
+            result
+                .entry(current_domain.clone())
+                .or_insert_with(|| KVMStats {
+                    block_paths: Vec::new(),
+                    mem_max: None,
+                    mem_current: None,
+                    state: VirDomainState::NoState,
+                });
             continue;
         }
+
+        if current_domain.is_empty() {
+            continue;
+        }
+
+        let stats = result.get_mut(&current_domain).unwrap();
 
         // Parse block device path: block.0.path=/var/lib/libvirt/images/mstest1.qcow2
         if line.starts_with("block.") && line.contains(".path=") {
             if let Some(eq_pos) = line.find('=') {
                 let path = &line[eq_pos + 1..];
-                if !path.is_empty() && !current_domain.is_empty() {
-                    result
-                        .entry(current_domain.clone())
-                        .or_insert_with(Vec::new)
-                        .push(path.to_string());
+                if !path.is_empty() {
+                    stats.block_paths.push(path.to_string());
+                }
+            }
+        }
+        // Parse balloon memory maximum: balloon.maximum=8388608
+        else if line.starts_with("balloon.maximum=") {
+            if let Some(eq_pos) = line.find('=') {
+                let value_str = &line[eq_pos + 1..];
+                if let Ok(value) = value_str.parse::<u64>() {
+                    stats.mem_max = Some(value);
+                }
+            }
+        }
+        // Parse balloon memory current: balloon.rss=2097152
+        else if line.starts_with("balloon.rss=") {
+            if let Some(eq_pos) = line.find('=') {
+                let value_str = &line[eq_pos + 1..];
+                if let Ok(value) = value_str.parse::<u64>() {
+                    stats.mem_current = Some(value);
+                }
+            }
+        }
+        // Parse domain state: state.state=1
+        else if line.starts_with("state.state=") {
+            if let Some(eq_pos) = line.find('=') {
+                let value_str = &line[eq_pos + 1..];
+                if let Ok(value) = value_str.parse::<u32>() {
+                    stats.state = VirDomainState::from(value);
                 }
             }
         }

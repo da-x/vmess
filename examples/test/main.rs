@@ -29,16 +29,16 @@ fn list_images(vmess: &mut vmess::VMess) -> Result<()> {
 }
 
 fn cleanup_vms_in_test_dir(test_dir: &PathBuf) -> Result<()> {
-    use vmess::virsh::get_batch_block_info;
+    use vmess::virsh::get_all_stats;
 
     log::info!("Cleaning up VMs with drives under test directory");
 
-    let block_info = get_batch_block_info()?;
+    let block_info = get_all_stats()?;
     let mut vms_to_cleanup = Vec::new();
 
     // Find VMs that have block devices under our test directory
-    for (vm_name, paths) in block_info {
-        for path in paths {
+    for (vm_name, stats) in block_info {
+        for path in &stats.block_paths {
             if PathBuf::from(&path).starts_with(test_dir) {
                 log::info!(
                     "Found VM '{}' with drive in test directory: {}",

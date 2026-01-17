@@ -38,7 +38,7 @@ use crate::utils::read_json_path;
 use crate::utils::write_json_path;
 use crate::utils::AddExtension;
 use crate::utils::{adjust_path_by_env, make_ssh, remote_shell_no_stderr};
-use crate::virsh::{get_batch_block_info, get_batch_network_info};
+use crate::virsh::{get_all_stats, get_batch_network_info, VirDomainState};
 use fstrings::*;
 
 use crate::query::{MatchInfo, VMState};
@@ -649,7 +649,7 @@ impl VMInfo {
 #[derive(Debug)]
 struct VM {
     name: String,
-    attrs: BTreeMap<String, String>,
+    stats: crate::virsh::KVMStats,
 }
 
 #[derive(Debug)]
@@ -1012,25 +1012,34 @@ impl VMess {
                 }
             }
 
-            // Get block information for all VMs in one call
-            let block_info = get_batch_block_info()?;
+            // Get comprehensive stats for all VMs in one call
+            let all_stats = get_all_stats()?;
 
-            // Now process each VM with the pre-collected block information
+            // Now process each VM with the pre-collected stats
             for vmname in vm_names {
                 let short_vmname = &vmname[vmname_prefix.len()..];
 
-                match Self::load_extra_domain_info_with_block_data(
-                    &mut files_to_domains,
-                    short_vmname,
-                    &vmname,
-                    &mut pool,
-                    block_info.get(&vmname),
-                ) {
-                    Ok(_) => {}
-                    Err(_) => {
-                        // Assume VM went away during iteration
-                        pool.vms.remove(short_vmname);
+                if let Some(stats) = all_stats.get(&vmname) {
+                    // Add block device paths to files_to_domains mapping
+                    for path_str in &stats.block_paths {
+                        let path = PathBuf::from(path_str);
+                        files_to_domains.insert(path.clone(), short_vmname.to_owned());
+
+                        // If this is a symlink, also add the target path
+                        if let Ok(target) = std::fs::canonicalize(&path) {
+                            if target != path {
+                                files_to_domains.insert(target, short_vmname.to_owned());
+                            }
+                        }
                     }
+
+                    // Create VM with stats
+                    let vm = VM {
+                        name: short_vmname.to_owned(),
+                        stats: stats.clone(),
+                    };
+
+                    pool.vms.insert(short_vmname.to_owned(), vm);
                 }
             }
         }
@@ -1245,29 +1254,33 @@ impl VMess {
 
             let (vm_state, mem_size) = if let Some(vm_using) = &image.vm_using {
                 if let Some(vm) = pool.vms.get(vm_using) {
-                    let state = vm.attrs.get("State").map(|x| x.as_str()).unwrap_or("");
+                    use crate::virsh::VirDomainState;
+                    let state = &vm.stats.state;
 
-                    let mem_size = if state == "running" {
-                        vm.attrs
-                            .get("Max memory")
-                            .map(|x| {
-                                Cow::from(format!(
-                                    "{:.2} GB",
-                                    (x.as_str()
-                                        .split(" ")
-                                        .nth(0)
-                                        .unwrap()
-                                        .parse::<i64>()
-                                        .unwrap()
-                                        / 1024) as f32
-                                        / 1024.0
-                                ))
+                    let mem_size = if *state == VirDomainState::Running {
+                        vm.stats
+                            .mem_current
+                            .map(|mem_kib| {
+                                Cow::from(format!("{:.2} GB", mem_kib as f32 / 1024.0 / 1024.0))
                             })
                             .unwrap_or(Cow::from(""))
                     } else {
                         Cow::from("")
                     };
-                    (state, mem_size)
+                    (
+                        match state {
+                            VirDomainState::Running => "running",
+                            VirDomainState::Shutoff => "shut off",
+                            VirDomainState::Paused => "paused",
+                            VirDomainState::Shutdown => "shutting down",
+                            VirDomainState::Crashed => "crashed",
+                            VirDomainState::Blocked => "blocked",
+                            VirDomainState::PmSuspended => "suspended",
+                            VirDomainState::NoState => "",
+                            VirDomainState::Unknown => "unknown",
+                        },
+                        mem_size,
+                    )
                 } else {
                     ("", Cow::from(""))
                 }
@@ -1372,13 +1385,23 @@ impl VMess {
                 // Check if this image matches the filter
                 let (vm_state, vm_info) = if let Some(vm_using) = &image.vm_using {
                     if let Some(vm) = pool.vms.get(vm_using) {
-                        let state = vm.attrs.get("State").map(|x| x.as_str()).unwrap_or("");
-                        let vm_state = match state {
-                            "running" => Some(crate::query::VMState::Running),
-                            "shut off" => Some(crate::query::VMState::Stopped),
+                        let vm_state = match vm.stats.state {
+                            VirDomainState::Running => Some(crate::query::VMState::Running),
+                            VirDomainState::Shutoff => Some(crate::query::VMState::Stopped),
                             _ => None,
                         };
-                        (vm_state, format!(" ({})", state))
+                        let state_str = match vm.stats.state {
+                            VirDomainState::Running => "running",
+                            VirDomainState::Shutoff => "shut off",
+                            VirDomainState::Paused => "paused",
+                            VirDomainState::Shutdown => "shutting down",
+                            VirDomainState::Crashed => "crashed",
+                            VirDomainState::Blocked => "blocked",
+                            VirDomainState::PmSuspended => "suspended",
+                            VirDomainState::NoState => "",
+                            VirDomainState::Unknown => "unknown",
+                        };
+                        (vm_state, format!(" ({})", state_str))
                     } else {
                         (None, String::new())
                     }
@@ -1476,8 +1499,7 @@ impl VMess {
 
         // Check VM state - must be undefined for freezing
         if let Some(vm) = &existing.vm {
-            let state = vm.attrs.get("State").map(|x| x.as_str()).unwrap_or("");
-            let vm_is_running = state == "running";
+            let vm_is_running = vm.stats.state == VirDomainState::Running;
 
             match params.force.as_deref() {
                 Some("stop") => {
@@ -1531,8 +1553,8 @@ impl VMess {
 
         // Calculate SHA256 hash
         let should_copy_while_running = if let Some(vm) = &existing.vm {
-            let state = vm.attrs.get("State").map(|x| x.as_str()).unwrap_or("");
-            state == "running" && params.force.as_deref() == Some("while-running")
+            vm.stats.state == VirDomainState::Running
+                && params.force.as_deref() == Some("while-running")
         } else {
             false
         };
@@ -2932,18 +2954,23 @@ impl VMess {
                     return Err(Error::CurrentlyDefined);
                 }
 
-                info!(
-                    "Stopping VM for {}{}",
-                    image_name,
-                    vm.attrs
-                        .get("State")
-                        .map(|s| format!(", state: {s}"))
-                        .unwrap_or("".to_owned())
-                );
+                let state_str = match vm.stats.state {
+                    VirDomainState::Running => "running",
+                    VirDomainState::Shutoff => "shut off",
+                    VirDomainState::Paused => "paused",
+                    VirDomainState::Shutdown => "shutting down",
+                    VirDomainState::Crashed => "crashed",
+                    VirDomainState::Blocked => "blocked",
+                    VirDomainState::PmSuspended => "suspended",
+                    VirDomainState::NoState => "",
+                    VirDomainState::Unknown => "unknown",
+                };
+
+                info!("Stopping VM for {}, state: {}", image_name, state_str);
 
                 let vmname_prefix = self.get_vm_prefix();
-                match vm.attrs.get("State").as_ref().map(|x| x.as_str()) {
-                    Some("shut off") => {
+                match vm.stats.state {
+                    VirDomainState::Shutoff => {
                         ibash_stdout!("virsh undefine --nvram {vmname_prefix}{vm.name}")?;
                     }
                     _ => {
@@ -3114,49 +3141,6 @@ impl VMess {
         }
 
         Ok(UpdateSshDisposition::Updated)
-    }
-
-    fn load_extra_domain_info_with_block_data(
-        files_to_domains: &mut HashMap<PathBuf, String>,
-        short_vmname: &str,
-        vmname: &str,
-        pool: &mut Pool,
-        block_paths: Option<&Vec<String>>,
-    ) -> Result<(), Error> {
-        lazy_static! {
-            static ref DOM_PROP: Regex = Regex::new(r"^([^:]+):[ \t]*([^ \t]+.*)$").unwrap();
-        }
-
-        // Use pre-collected block information if available
-        if let Some(paths) = block_paths {
-            for path_str in paths {
-                let path = PathBuf::from(path_str);
-                files_to_domains.insert(path.clone(), short_vmname.to_owned());
-
-                // If this is a symlink, also add the target path
-                if let Ok(target) = std::fs::canonicalize(&path) {
-                    if target != path {
-                        files_to_domains.insert(target, short_vmname.to_owned());
-                    }
-                }
-            }
-        }
-
-        let mut vm = VM {
-            attrs: Default::default(),
-            name: short_vmname.to_owned(),
-        };
-
-        for line in ibash_stdout!("virsh dominfo {vmname}")?.lines() {
-            if let Some(cap) = DOM_PROP.captures(&line) {
-                let key = cap.get(1).unwrap().as_str();
-                let value = cap.get(2).unwrap().as_str();
-                vm.attrs.insert(key.to_owned(), value.to_owned());
-            }
-        }
-
-        pool.vms.insert(short_vmname.to_owned(), vm);
-        Ok(())
     }
 }
 
