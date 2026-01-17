@@ -206,6 +206,8 @@ fn main_wrap() -> Result<()> {
 
     // Now move modified-b to shared pool (should work now)
     info!("Moving modified-b to shared pool");
+    tree_images(&mut vmess)?;
+
     vmess.move_to("modified-b", "shared")?;
     info!("✅ Successfully moved modified-b to shared pool");
 
@@ -230,12 +232,16 @@ fn main_wrap() -> Result<()> {
 
     test_title!("Test publish functionality");
     fork_with_publish(&mut vmess)?;
-    
+
     tree_images(&mut vmess)?;
 
     test_title!("Forking a shared cached image");
     // This overrides the second modification because we did not freeze it.
     check_cached(|| fork_modified(&mut vmess, "modified-b", "Modification for B"))?;
+    // We are properly caching based on published images, this should return immediately.
+    check_cached(|| fork_modified(&mut vmess, "modified-b", "Override modification for B"))?;
+
+    // TODO - If a tag is missing, we still want the fork to be cached if there is a matching image.
 
     cleanup_vms_in_test_dir(&test_dir)?;
 
@@ -357,22 +363,25 @@ fn freeze(vmess: &mut vmess::VMess, target: &str) -> Result<()> {
 
 fn fork_with_publish(vmess: &mut vmess::VMess) -> Result<()> {
     log::info!("Testing fork with publish flag");
-    
+
     let fork_publish_params = Fork {
         name: "published-image".to_string(),
         base_template: Some("main".to_string()),
         force: true,
         parent: Some("rocky-8-s".to_string()),
-        script: Some("echo 'Published image modification' | sudo tee /usr/bin/published > /dev/null".to_string()),
+        script: Some(
+            "echo 'Published image modification' | sudo tee /usr/bin/published > /dev/null"
+                .to_string(),
+        ),
         changes: Some("Published image changes".to_string()),
         cached: true,
-        publish: true,  // This is the new flag we're testing
+        publish: true, // This is the new flag we're testing
         ..Default::default()
     };
 
     vmess.fork(fork_publish_params)?;
     info!("✅ Fork with publish completed successfully");
-    
+
     Ok(())
 }
 

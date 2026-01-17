@@ -1870,13 +1870,58 @@ impl VMess {
 
         info!("Moved {} to {}", tmp_path.display(), final_path.display());
 
-        // Recreate tag symlinks in target pool if they exist
+        // Move the corresponding JSON file if it exists
         let image_stem = existing
             .image
             .rel_path
             .file_stem()
             .unwrap()
             .to_string_lossy();
+        let source_json_path = existing
+            .image
+            .pool_directory
+            .join(format!("{}.json", image_stem));
+
+        if source_json_path.exists() {
+            let target_json_path = target_pool.path.join(format!("{}.json", image_stem));
+
+            // Ensure parent directory exists for JSON file
+            if let Some(parent) = target_json_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+
+            // Try hard link first for JSON file, fallback to copy
+            if let Err(_) = std::fs::hard_link(&source_json_path, &target_json_path) {
+                info!("Hard link failed for JSON file, copying instead");
+                std::fs::copy(&source_json_path, &target_json_path).with_context(|| {
+                    format!(
+                        "Failed to copy JSON file {} to {}",
+                        source_json_path.display(),
+                        target_json_path.display()
+                    )
+                })?;
+            } else {
+                info!("Successfully hard linked JSON file");
+            }
+
+            // Remove source JSON file after successful copy/link
+            std::fs::remove_file(&source_json_path).with_context(|| {
+                format!(
+                    "Failed to remove source JSON file {}",
+                    source_json_path.display()
+                )
+            })?;
+
+            info!(
+                "Moved JSON file {} to {}",
+                source_json_path.display(),
+                target_json_path.display()
+            );
+        } else {
+            info!("No JSON file found for image '{}'", image_stem);
+        }
+
+        // Recreate tag symlinks in target pool if they exist
         if let Some(tag_name) = pool.rev_tags.get(&image_stem.to_string()) {
             let new_tag_path = target_pool.path.join(format!("{}.qcow2", tag_name));
 
@@ -2636,6 +2681,28 @@ impl VMess {
             }
         }
 
+        // Ensure JSON file doesn't exist before creating the new image
+        let new_json_path = new.with_extension("json");
+        if new_json_path.exists() {
+            std::fs::remove_file(&new_json_path)?;
+            info!(
+                "Removed existing JSON file before fork: {}",
+                new_json_path.display()
+            );
+        }
+
+        // Also remove JSON file symlink from main pool if creating in temp/other pool
+        if params.temp || params.pool.is_some() {
+            let main_json_path = new_main_pool_image.with_extension("json");
+            if main_json_path.exists() {
+                std::fs::remove_file(&main_json_path)?;
+                info!(
+                    "Removed existing JSON file symlink from main pool before fork: {}",
+                    main_json_path.display()
+                );
+            }
+        }
+
         let cmd = format!("qemu-img create -f qcow2 {new_disp} -F qcow2 -b {backing_disp}");
         let v = ibash_stdout!("{}", cmd).with_context(|| {
             format!(
@@ -2773,6 +2840,19 @@ impl VMess {
         .join(&new_base_name);
 
         let _ = std::fs::remove_file(&new);
+
+        // Also remove any existing JSON file since New doesn't populate it with content
+        let json_path = if !params.temp {
+            self.config.pool_path.join(format!("{}.json", name))
+        } else {
+            self.config.tmp_path.join(format!("{}.json", name))
+        };
+
+        if json_path.exists() {
+            let _ = std::fs::remove_file(&json_path);
+            info!("Removed existing JSON file: {}", json_path.display());
+        }
+
         let new_disp = new.display();
 
         let image_size = format!("{}", params.size).replace(" ", "");
@@ -3133,6 +3213,14 @@ impl VMess {
             let tmp_image_path = self.config.tmp_path.join(&image_path);
             if tmp_image_path.exists() {
                 std::fs::remove_file(&tmp_image_path)?;
+            }
+
+            // Remove corresponding JSON file from the image's actual pool directory
+            let image_stem = image_path.file_stem().unwrap().to_string_lossy();
+            let actual_json_path = image.pool_directory.join(format!("{}.json", image_stem));
+            if actual_json_path.exists() {
+                std::fs::remove_file(&actual_json_path)?;
+                info!("Removed JSON file: {}", actual_json_path.display());
             }
         }
 
