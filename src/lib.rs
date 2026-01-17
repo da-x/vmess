@@ -1770,13 +1770,13 @@ impl VMess {
 
         // Get the backing chain and validate all images are in the target shared pool
         let backing_chain = pool.get_backing_chain_by_name(&params.image)?;
-        
+
         for image in &backing_chain {
             // Skip the first image (the one we're moving)
             if image.rel_path == existing.image.rel_path {
                 continue;
             }
-            
+
             // Check if this backing image is already in the target shared pool
             if image.pool_directory != target_pool.path {
                 return Err(Error::FreeText(format!(
@@ -1904,7 +1904,10 @@ impl VMess {
     }
 
     pub fn move_to(&mut self, image: &str, pool: &str) -> Result<(), Error> {
-        self.move_image(Move { image: image.to_string(), pool: pool.to_string() })
+        self.move_image(Move {
+            image: image.to_string(),
+            pool: pool.to_string(),
+        })
     }
 
     fn get_template(&self, name: &str) -> Result<Element, Error> {
@@ -2327,7 +2330,9 @@ impl VMess {
     }
 
     pub fn fork(&mut self, params: Fork) -> Result<(), Error> {
-        let pool = self.get_pool()?;
+        let pool = self
+            .get_pool()
+            .with_context(|| "Failed to get pool in fork".to_string())?;
 
         // Validate script/changes parameters
         if params.script.is_some() && params.changes.is_none() {
@@ -2337,7 +2342,9 @@ impl VMess {
         }
 
         if let Some(base_template) = &params.base_template {
-            let _xml = self.get_template(&base_template)?;
+            let _xml = self
+                .get_template(&base_template)
+                .with_context(|| format!("Failed to get template '{}'", base_template))?;
         }
 
         let new_full_name = params.name.clone();
@@ -2345,7 +2352,9 @@ impl VMess {
         // Find the parent image: either explicitly specified or longest prefix match
         let parent = if let Some(parent_name) = &params.parent {
             // Use explicitly specified parent
-            pool.get_by_name(parent_name)?.image
+            pool.get_by_name(parent_name)
+                .with_context(|| format!("Failed to find parent image '{}'", parent_name))?
+                .image
         } else {
             // Find the longest existing image for which the new name is a prefix
             let mut longest_match: Option<&Image> = None;
@@ -2371,7 +2380,7 @@ impl VMess {
         }
 
         let new_base_name = PathBuf::from(format!("{}.qcow2", params.name));
-        let new_adv = self.config.pool_path.join(&new_base_name);
+        let new_main_pool_image = self.config.pool_path.join(&new_base_name);
 
         // Verify parent is not currently running
         if let Some(vm_using) = &parent.vm_using {
@@ -2413,7 +2422,15 @@ impl VMess {
                         r2?;
                     }
                 }
-                std::fs::remove_file(&new_adv)?;
+
+                if new_main_pool_image.exists() {
+                    std::fs::remove_file(&new_main_pool_image).with_context(|| {
+                        format!(
+                            "Failed to remove existing file '{}'",
+                            new_main_pool_image.display()
+                        )
+                    })?;
+                }
             } else {
                 return Err(Error::AlreadyExists);
             }
@@ -2473,9 +2490,9 @@ impl VMess {
 
         let new_disp = new.display();
         if params.temp || params.pool.is_some() {
-            let _ = std::fs::remove_file(&new_adv);
-            std::os::unix::fs::symlink(&new, &new_adv)
-                .with_context(|| format!("symlink {} creation", new_adv.display()))?;
+            let _ = std::fs::remove_file(&new_main_pool_image);
+            std::os::unix::fs::symlink(&new, &new_main_pool_image)
+                .with_context(|| format!("symlink {} creation", new_main_pool_image.display()))?;
         }
 
         let pool_path = &self.config.pool_path;
@@ -2500,13 +2517,29 @@ impl VMess {
             })?;
 
         // Ensure all images in the backing chain have symlinks in pool_path
-        self.ensure_backing_chain_symlinks(&backing_chain)?;
+        self.ensure_backing_chain_symlinks(&backing_chain)
+            .with_context(|| {
+                format!(
+                    "Failed to ensure backing chain symlinks for parent '{}'",
+                    parent.rel_path.display()
+                )
+            })?;
 
         if params.temp {
-            std::fs::create_dir_all(&self.config.tmp_path)?;
+            std::fs::create_dir_all(&self.config.tmp_path).with_context(|| {
+                format!(
+                    "Failed to create temp directory '{}'",
+                    self.config.tmp_path.display()
+                )
+            })?;
         }
 
-        if !backing.metadata()?.permissions().readonly() {
+        if !backing
+            .metadata()
+            .with_context(|| format!("Failed to get metadata for backing file '{}'", backing_disp))?
+            .permissions()
+            .readonly()
+        {
             info!("Setting parent image to read-only");
             if backing.metadata()?.uid() != get_current_uid() {
                 ibash_stdout!("sudo -u qemu chmod u-w {backing_disp}")?;
@@ -3205,16 +3238,15 @@ impl Pool {
                     continue;
                 }
 
-                let target = match std::fs::canonicalize(&path) {
+                let target = match std::fs::read_link(&path) {
                     Ok(target) => target,
                     Err(_) => continue,
                 };
 
-                // Check if target is in the same pool (not outside)
-                let target_relative = match target.strip_prefix(lookup_path) {
-                    Ok(rel) => rel,
-                    Err(_) => continue,
-                };
+                // Only target pointing inside the directory
+                if target.to_string_lossy().contains("/") {
+                    continue;
+                }
 
                 // Remove .qcow2 suffix from symlink name to get tag name
                 let tag_name = path
@@ -3224,11 +3256,29 @@ impl Pool {
                     .to_string();
 
                 // Remove .qcow2 suffix from target name to get image name
-                let image_name = target_relative
+                let image_name = target
                     .file_stem()
                     .unwrap_or_default()
                     .to_string_lossy()
                     .to_string();
+
+                if self.images.find_by_name(&image_name).is_none() {
+                    // Ignore tags that point to images that don't exist.
+                    continue;
+                }
+
+                if self.images.find_by_name(&tag_name).is_some() {
+                    // Ignore tags that are superseeded by actual images in some
+                    // pools
+                    continue;
+                }
+
+                if self.tags.contains_key(&tag_name) {
+                    // We prioritize the first tag we see based on the pool
+                    // lookup order and ignore the other tags as if they
+                    // don't exist.
+                    continue;
+                }
 
                 // Add to tags maps
                 self.tags.insert(tag_name.clone(), image_name.clone());

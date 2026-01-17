@@ -143,6 +143,7 @@ fn main_wrap() -> Result<()> {
     test_title!("Check cached freezing");
 
     freeze_parent(&mut vmess)?;
+    tree_images(&mut vmess)?;
     fork_modified(&mut vmess, "modified-b", "Modification for B")?;
     tree_images(&mut vmess)?;
 
