@@ -102,6 +102,33 @@ fn cleanup_vms_in_test_dir(test_dir: &PathBuf) -> Result<()> {
     Ok(())
 }
 
+fn remove_all_symlinks_in_directory(dir_path: &PathBuf) -> Result<()> {
+    use std::fs;
+
+    info!("Removing all symlinks in directory: {}", dir_path.display());
+
+    let entries = fs::read_dir(dir_path)?;
+    let mut removed_count = 0;
+
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+
+        if path.is_symlink() {
+            fs::remove_file(&path)?;
+            info!("Removed symlink: {}", path.display());
+            removed_count += 1;
+        }
+    }
+
+    info!(
+        "✅ Removed {} symlinks from {}",
+        removed_count,
+        dir_path.display()
+    );
+    Ok(())
+}
+
 fn main_wrap() -> Result<()> {
     let args = Args::from_args();
 
@@ -186,6 +213,19 @@ fn main_wrap() -> Result<()> {
 
     test_title!("Forking in main after move to shared");
     fork_modified(&mut vmess, "modified-b", "Third Modification for B")?;
+    tree_images(&mut vmess)?;
+
+    test_title!("Test symlink restoration");
+
+    // Remove all symlinks in the main pool
+    let main_pool_path = test_dir.join("main");
+    remove_all_symlinks_in_directory(&main_pool_path)?;
+
+    // Now try to fork modified-c - this should trigger symlink restoration
+    info!("Attempting to fork modified-c, which should restore missing symlinks");
+    fork_modified(&mut vmess, "modified-c", "Fourth Modification for B")?;
+    info!("✅ Successfully forked modified-c - symlinks should have been restored");
+
     tree_images(&mut vmess)?;
 
     cleanup_vms_in_test_dir(&test_dir)?;
