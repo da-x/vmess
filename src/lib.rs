@@ -827,7 +827,13 @@ impl VMess {
                 PathBuf::from(path)
             } else {
                 if let Some(dir) = dirs::config_dir() {
-                    dir.join("vmess").join("config.toml")
+                    let fp = dir.join("vmess").join("config.toml");
+                    let fp_2 = dir.join("vmess").join("config-0.2.toml"); // Transition period
+                    if fp_2.exists() {
+                        fp_2
+                    } else {
+                        fp
+                    }
                 } else {
                     return Err(Error::ConfigFile);
                 }
