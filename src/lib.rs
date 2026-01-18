@@ -1177,14 +1177,19 @@ impl VMess {
                 // Create or update the image
                 let ret = match current_image.images.entry(key.to_owned()) {
                     btree_map::Entry::Vacant(v) => {
-                        let mut image =
-                            Image::new(&layer.real_location, &layer.basename, &files_to_domains)
-                                .with_context(|| {
-                                    format!(
-                                        "during image resolve of path {}",
-                                        layer.real_location.join(&layer.basename).display()
-                                    )
-                                })?;
+                        let image_res =
+                            Image::new(&layer.real_location, &layer.basename, &files_to_domains);
+                        let mut image = match image_res {
+                            Ok(image) => image,
+                            Err(err) => {
+                                warn!(
+                                    "error {} during image resolve of path {}",
+                                    err,
+                                    layer.real_location.join(&layer.basename).display()
+                                );
+                                break;
+                            }
+                        };
                         image.vm_info = current_vm_info;
                         image.merged_vm_info = merged_vm_info.clone();
                         v.insert(image)
