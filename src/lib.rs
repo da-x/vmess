@@ -660,6 +660,12 @@ struct VM {
     stats: crate::virsh::KVMStats,
 }
 
+#[derive(Debug, Clone)]
+pub struct TagInfo {
+    pub image_name: String,
+    pub pool_name: String,
+}
+
 #[derive(Debug)]
 pub struct Pool {
     images: ImageCollection,
@@ -667,7 +673,7 @@ pub struct Pool {
 
     // Tag are just name aliases and they are managed by having
     // symlinks in the pool directory. See 'load_tags'.
-    tags: HashMap<String, String>,     // tag_name -> image_name
+    tags: HashMap<String, TagInfo>,    // tag_name -> TagInfo
     rev_tags: HashMap<String, String>, // image_name -> tag_name
 }
 
@@ -679,8 +685,8 @@ pub struct GetInfo<'a> {
 impl Pool {
     pub fn get_by_name<'a>(&'a self, name: &str) -> Result<GetInfo<'a>, Error> {
         // Check if name is a tag, and use the image name if it is
-        let lookup_name = if let Some(image_name) = self.tags.get(name) {
-            image_name.as_str()
+        let lookup_name = if let Some(tag_info) = self.tags.get(name) {
+            tag_info.image_name.as_str()
         } else {
             name
         };
@@ -707,8 +713,8 @@ impl Pool {
 
     fn get_backing_chain_by_name(&self, name: &str) -> Result<Vec<&Image>, Error> {
         // Check if name is a tag, and use the image name if it is
-        let lookup_name = if let Some(image_name) = self.tags.get(name) {
-            image_name.as_str()
+        let lookup_name = if let Some(tag_info) = self.tags.get(name) {
+            tag_info.image_name.as_str()
         } else {
             name
         };
@@ -1172,7 +1178,15 @@ impl VMess {
             }
         }
 
-        pool.load_tags(lookup_paths)?;
+        // Build a mapping from path to pool name for load_tags
+        let mut path_to_pool = std::collections::HashMap::new();
+        path_to_pool.insert(self.config.pool_path.clone(), "main".to_string());
+        path_to_pool.insert(self.config.tmp_path.clone(), "tmp".to_string());
+        for shared_pool in &self.config.pools {
+            path_to_pool.insert(shared_pool.path.clone(), shared_pool.name.clone());
+        }
+        
+        pool.load_tags(lookup_paths, path_to_pool)?;
 
         Ok(pool)
     }
@@ -1463,14 +1477,8 @@ impl VMess {
         // Display loaded tags
         if !pool.tags.is_empty() {
             println!("\nLoaded Tags:");
-            for (tag_name, image_name) in &pool.tags {
-                // Find the image to get its pool information
-                if let Ok(image_result) = pool.get_by_name(image_name) {
-                    let pool_name = image_result.image.get_pool_name(&self.config);
-                    println!("  {} -> {} [pool: {}]", tag_name, image_name, pool_name);
-                } else {
-                    println!("  {} -> {}", tag_name, image_name);
-                }
+            for (tag_name, tag_info) in &pool.tags {
+                println!("  {} -> {} [pool: {}]", tag_name, tag_info.image_name, tag_info.pool_name);
             }
         }
 
@@ -3387,7 +3395,7 @@ impl VMess {
 }
 
 impl Pool {
-    fn load_tags(&mut self, lookup_paths: Vec<PathBuf>) -> Result<(), Error> {
+    fn load_tags(&mut self, lookup_paths: Vec<PathBuf>, path_to_pool: std::collections::HashMap<PathBuf, String>) -> Result<(), Error> {
         Ok(for lookup_path in &lookup_paths {
             for entry in std::fs::read_dir(lookup_path)
                 .with_context(|| format!("reading directory {} for tags", lookup_path.display()))?
@@ -3442,8 +3450,17 @@ impl Pool {
                     continue;
                 }
 
+                // Find the pool name for this lookup path
+                let pool_name = path_to_pool.get(lookup_path)
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_string());
+                
                 // Add to tags maps
-                self.tags.insert(tag_name.clone(), image_name.clone());
+                let tag_info = TagInfo {
+                    image_name: image_name.clone(),
+                    pool_name,
+                };
+                self.tags.insert(tag_name.clone(), tag_info);
                 self.rev_tags.insert(image_name, tag_name);
             }
         })
