@@ -228,13 +228,8 @@ pub(crate) fn get_qcow2_backing_chain(
                 // Check if it's a real file, not a symlink
                 if let Ok(symlink_metadata) = std::fs::symlink_metadata(&candidate_path) {
                     if !symlink_metadata.file_type().is_symlink() {
-                        if real_location.is_some() {
-                            return Err(Error::FreeText(format!(
-                                "Multiple real locations found for file '{}' - expected exactly one",
-                                basename.display()
-                            )));
-                        }
                         real_location = Some(lookup_path.clone());
+                        break;
                     }
                 }
             }
