@@ -3212,30 +3212,29 @@ impl VMess {
         if params.regex {
             // For regex mode, match against display names
             for image in pool.get_all_images() {
-                let image_path_str = image.rel_path.to_string_lossy();
-                let image_name = strip_frozen_suffix(&image_path_str).replace('%', ".");
-
+                let image_stem = image.rel_path.file_stem().unwrap().to_string_lossy();
+                let image_name_rep = image_stem.replace('%', ".");
                 for pattern in params.names.iter() {
                     let regex = Regex::new(pattern)?;
-                    if regex.is_match(&image_name) {
+                    if regex.is_match(&image_name_rep) || regex.is_match(&image_stem) {
                         images_to_kill.push(image);
                         break;
                     }
                 }
             }
         } else {
-            // For exact match mode, use the same logic as rename command
+            // Exact match mode
             for name in params.names.iter() {
-                match pool.get_by_name(name) {
-                    Ok(info) => {
-                        images_to_kill.push(info.image);
-                    }
-                    Err(Error::NotFound(_)) => {
-                        if !params.dry_run {
-                            eprintln!("Warning: Image '{}' not found", name);
+                let image_name_rep = name.replace('%', ".");
+                for name in [name, &image_name_rep] {
+                    match pool.images.find_by_name(name) {
+                        Some(image) => {
+                            images_to_kill.push(image);
+                        }
+                        None => {
+                            return Err(Error::NotFound(name.to_string()));
                         }
                     }
-                    Err(e) => return Err(e),
                 }
             }
         }
