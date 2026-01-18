@@ -307,7 +307,7 @@ pub struct Overrides {
     pub secure_boot: bool,
 
     #[structopt(long)]
-    pub destroy_on_reboot: bool,
+    pub stop_on_reboot: bool,
 
     /// Increase main image size to this amount
     #[structopt(long)]
@@ -337,6 +337,10 @@ pub struct Spawn {
 
     #[structopt(flatten)]
     pub overrides: Overrides,
+
+    /// Optional size for new image creation if image doesn't exist
+    #[structopt(skip)]
+    pub new_size: Option<byte_unit::Byte>,
 }
 
 #[derive(Debug, StructOpt, Clone)]
@@ -1185,7 +1189,7 @@ impl VMess {
         for shared_pool in &self.config.pools {
             path_to_pool.insert(shared_pool.path.clone(), shared_pool.name.clone());
         }
-        
+
         pool.load_tags(lookup_paths, path_to_pool)?;
 
         Ok(pool)
@@ -1478,7 +1482,10 @@ impl VMess {
         if !pool.tags.is_empty() {
             println!("\nLoaded Tags:");
             for (tag_name, tag_info) in &pool.tags {
-                println!("  {} -> {} [pool: {}]", tag_name, tag_info.image_name, tag_info.pool_name);
+                println!(
+                    "  {} -> {} [pool: {}]",
+                    tag_name, tag_info.image_name, tag_info.pool_name
+                );
             }
         }
 
@@ -2114,7 +2121,7 @@ impl VMess {
             }
         }
 
-        if overrides.destroy_on_reboot {
+        if overrides.stop_on_reboot {
             let _ = xml.take_child("on_reboot");
 
             let new_elem = format!(r#"<on_reboot>destroy</on_reboot>"#,);
@@ -2228,10 +2235,26 @@ impl VMess {
         Ok(())
     }
 
-    fn spawn(&self, params: Spawn) -> Result<(), Error> {
-        let pool = self.get_pool()?;
+    fn spawn(&mut self, params: Spawn) -> Result<(), Error> {
+        let mut pool = self.get_pool()?;
 
-        let to_bring_up = pool.get_by_name(&params.full)?;
+        let to_bring_up = match pool.get_by_name(&params.full) {
+            Ok(image) => image,
+            Err(Error::NotFound(_)) if params.new_size.is_some() => {
+                // Image doesn't exist, create it with the specified size
+                let new_params = New {
+                    name: params.full.clone(),
+                    temp: params.temp,
+                    size: params.new_size.unwrap(),
+                };
+                self.new_image(new_params)?;
+                
+                // Re-read the pool after creating the new image
+                pool = self.get_pool()?;
+                pool.get_by_name(&params.full)?
+            },
+            Err(e) => return Err(e),
+        };
         if !to_bring_up.image.sub.is_empty() {
             return Err(Error::HasSubImages(params.full.clone(), ""));
         }
@@ -2474,7 +2497,7 @@ impl VMess {
     }
 
     pub fn fork_with(
-        &self,
+        &mut self,
         params: Fork,
         f: impl FnOnce(&str) -> anyhow::Result<()>,
     ) -> Result<(), Error> {
@@ -2756,6 +2779,7 @@ impl VMess {
                 volatile: params.volatile,
                 paused: params.paused,
                 overrides: params.overrides.clone(),
+                new_size: None,
             })?;
         }
 
@@ -3395,7 +3419,11 @@ impl VMess {
 }
 
 impl Pool {
-    fn load_tags(&mut self, lookup_paths: Vec<PathBuf>, path_to_pool: std::collections::HashMap<PathBuf, String>) -> Result<(), Error> {
+    fn load_tags(
+        &mut self,
+        lookup_paths: Vec<PathBuf>,
+        path_to_pool: std::collections::HashMap<PathBuf, String>,
+    ) -> Result<(), Error> {
         Ok(for lookup_path in &lookup_paths {
             for entry in std::fs::read_dir(lookup_path)
                 .with_context(|| format!("reading directory {} for tags", lookup_path.display()))?
@@ -3451,10 +3479,11 @@ impl Pool {
                 }
 
                 // Find the pool name for this lookup path
-                let pool_name = path_to_pool.get(lookup_path)
+                let pool_name = path_to_pool
+                    .get(lookup_path)
                     .cloned()
                     .unwrap_or_else(|| "unknown".to_string());
-                
+
                 // Add to tags maps
                 let tag_info = TagInfo {
                     image_name: image_name.clone(),
