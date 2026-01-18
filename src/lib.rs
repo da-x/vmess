@@ -138,11 +138,11 @@ pub struct Fork {
 
     /// Enable volatile VM execution - the domain definition will not be saved, and
     /// the definition will be removed when stopped.
-    #[structopt(name = "volatile", short = "v")]
+    #[structopt(long = "volatile", short = "v")]
     pub volatile: bool,
 
     /// Store image in the temp pool, implies 'volatile'
-    #[structopt(name = "temp", short = "t")]
+    #[structopt(long = "temp", short = "t")]
     pub temp: bool,
 
     /// Store image in the given pool
@@ -150,15 +150,19 @@ pub struct Fork {
     pub pool: Option<String>,
 
     /// Base template used for actual VM execution
-    #[structopt(name = "base-template", short = "b")]
+    #[structopt(long = "base-template", short = "b")]
     pub base_template: Option<String>,
 
     /// Start as paused
-    #[structopt(name = "paused", short = "p")]
+    #[structopt(long = "paused", short = "p")]
     pub paused: bool,
 
+    /// Wait for VM to finish booting and then exit
+    #[structopt(long = "wait", short = "w")]
+    pub wait: bool,
+
     /// Force operation (will kill the VM if it exists)
-    #[structopt(name = "force", short = "f")]
+    #[structopt(long = "force", short = "f")]
     pub force: bool,
 
     #[structopt(long = "print-parent")]
@@ -334,6 +338,10 @@ pub struct Spawn {
     /// Don't start the VM after creation
     #[structopt(name = "paused", short = "s")]
     pub paused: bool,
+
+    /// Wait for VM to boot after spawn
+    #[structopt(name = "wait", short = "w")]
+    pub wait: bool,
 
     #[structopt(flatten)]
     pub overrides: Overrides,
@@ -2235,7 +2243,7 @@ impl VMess {
         Ok(())
     }
 
-    fn spawn(&mut self, params: Spawn) -> Result<(), Error> {
+    fn spawn(&self, params: Spawn) -> Result<(), Error> {
         let mut pool = self.get_pool()?;
 
         let to_bring_up = match pool.get_by_name(&params.full) {
@@ -2248,11 +2256,11 @@ impl VMess {
                     size: params.new_size.unwrap(),
                 };
                 self.new_image(new_params)?;
-                
+
                 // Re-read the pool after creating the new image
                 pool = self.get_pool()?;
                 pool.get_by_name(&params.full)?
-            },
+            }
             Err(e) => return Err(e),
         };
         if !to_bring_up.image.sub.is_empty() {
@@ -2370,6 +2378,13 @@ impl VMess {
 
         dir.close()?;
 
+        // Wait for VM to boot if requested
+        if params.wait {
+            self.wait(Wait {
+                name: params.full.clone(),
+            })?;
+        }
+
         Ok(())
     }
 
@@ -2425,6 +2440,8 @@ impl VMess {
             std::thread::sleep(std::time::Duration::from_millis(1000));
             self.update_ssh(UpdateSshParams { quiet: true })?;
         }
+
+        info!("Wait done");
 
         Ok(())
     }
@@ -2497,7 +2514,7 @@ impl VMess {
     }
 
     pub fn fork_with(
-        &mut self,
+        &self,
         params: Fork,
         f: impl FnOnce(&str) -> anyhow::Result<()>,
     ) -> Result<(), Error> {
@@ -2778,6 +2795,7 @@ impl VMess {
                 temp: params.temp,
                 volatile: params.volatile,
                 paused: params.paused,
+                wait: false,
                 overrides: params.overrides.clone(),
                 new_size: None,
             })?;
@@ -2803,6 +2821,10 @@ impl VMess {
                 name: vm_name.to_string(),
             })?;
 
+            if params.wait {
+                return Ok(());
+            }
+
             f(vm_name).map_err(Error::CallBack)?;
 
             // Shutdown VM and wait for it to stop
@@ -2826,6 +2848,18 @@ impl VMess {
             write_json_path(json_path.clone(), &vm_info).with_context(|| {
                 format!("Failed to write changes JSON file: {}", json_path.display())
             })?;
+        } else {
+            if params.publish {
+                return Err(Error::FreeText(
+                    "When --wait is specified, --publish cannot be used".to_string(),
+                ));
+            }
+
+            self.wait(Wait {
+                name: params.name.to_string(),
+            })?;
+
+            return Ok(());
         }
 
         // Handle publish flag - freeze and move to shared pool if one exists
