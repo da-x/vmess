@@ -1,7 +1,9 @@
 use fstrings::*;
 use std::collections::HashMap;
+use std::thread;
+use std::time::Duration;
 
-use crate::{ibash_stdout, Error};
+use crate::{ibash_stdout, utils::bash_stdout, Error};
 
 // Type aliases for network information
 pub type InterfaceName = String;
@@ -34,6 +36,21 @@ impl From<u32> for VirDomainState {
             6 => VirDomainState::Crashed,
             7 => VirDomainState::PmSuspended,
             _ => VirDomainState::Unknown,
+        }
+    }
+}
+
+fn virsh_domstats_with_retry(cmd: &str) -> Result<String, Error> {
+    const RETRY_DELAY: Duration = Duration::from_millis(500);
+
+    loop {
+        match bash_stdout(cmd.to_string()) {
+            Ok(output) => return Ok(output),
+            Err(Error::CommandError(_, stderr)) if stderr.contains("Connection reset by peer") => {
+                thread::sleep(RETRY_DELAY);
+                continue;
+            }
+            Err(e) => return Err(e),
         }
     }
 }
@@ -73,8 +90,9 @@ fn get_vm_interface_mappings() -> Result<HashMap<VmName, Vec<InterfaceName>>, Er
 
     let mut result = HashMap::new();
 
-    let output =
-        ibash_stdout!("virsh domstats --list-running --interface | grep -E 'Domain|\\.name'")?;
+    let output = virsh_domstats_with_retry(
+        "virsh domstats --list-running --interface | grep -E 'Domain|\\.name'",
+    )?;
     let mut current_domain = String::new();
 
     for line in output.lines() {
@@ -183,7 +201,7 @@ pub fn get_batch_network_info() -> Result<HashMap<VmName, IpAddress>, Error> {
 pub fn get_all_stats() -> Result<HashMap<VmName, KVMStats>, Error> {
     let mut result = HashMap::new();
 
-    let output = ibash_stdout!("virsh domstats")?;
+    let output = virsh_domstats_with_retry("virsh domstats")?;
 
     let mut current_domain = String::new();
 
