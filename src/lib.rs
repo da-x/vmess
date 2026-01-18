@@ -3094,7 +3094,7 @@ impl VMess {
                 }
             } else {
                 return Err(Error::FreeText(format!(
-                    "Cannot rename frozen image {} directly. Frozen images can only be renamed via tags",
+                    "Cannot rename frozen image {} directly. Frozen images can only have their tags renamed",
                     params.name
                 )));
             }
@@ -3102,56 +3102,56 @@ impl VMess {
 
         // Handle non-frozen images
         let existing_image_path = existing.image.get_absolute_path();
-        let pool_directory = &existing.image.pool_directory;
+        let new_base_name = format!("{}.qcow2", params.new_name);
+        let new_image_path = existing_image_path.with_file_name(&new_base_name);
 
-        // Check if image exists in tmp_path
-        let tmp_image_path = self.config.tmp_path.join(&existing.image.rel_path);
-        if tmp_image_path.exists() {
-            // Handle images in tmp directory with symlinks
-            let new_base_name = format!("{}.qcow2", params.new_name);
-            let new_tmp_path = self.config.tmp_path.join(&new_base_name);
+        // Rename the actual image file
+        std::fs::rename(&existing_image_path, &new_image_path).map_err(|e| {
+            Error::Context(
+                format!(
+                    "rename image: {} -> {}",
+                    existing_image_path.display(),
+                    new_image_path.display()
+                ),
+                Box::new(e),
+            )
+        })?;
+
+        // Handle symlink in main pool
+        if existing.image.pool_directory != self.config.pool_path {
             let old_link_path = self.config.pool_path.join(&existing.image.rel_path);
             let new_link_path = self.config.pool_path.join(&new_base_name);
 
-            // Rename the actual file in tmp
-            std::fs::rename(&tmp_image_path, &new_tmp_path).map_err(|e| {
-                Error::Context(
-                    format!(
-                        "rename tmp file: {} -> {}",
-                        tmp_image_path.display(),
-                        new_tmp_path.display()
-                    ),
-                    Box::new(e),
-                )
-            })?;
-
-            // Remove old symlink
-            std::fs::remove_file(&old_link_path).map_err(|e| {
-                Error::Context(
-                    format!("remove old symlink {}", old_link_path.display()),
-                    Box::new(e),
-                )
-            })?;
+            // Remove old symlink if it exists
+            if old_link_path.exists() {
+                std::fs::remove_file(&old_link_path).map_err(|e| {
+                    Error::Context(
+                        format!("remove old symlink {}", old_link_path.display()),
+                        Box::new(e),
+                    )
+                })?;
+            }
 
             // Create new symlink
             let _ = std::fs::remove_file(&new_link_path); // Remove if exists
-            std::os::unix::fs::symlink(&new_tmp_path, &new_link_path).map_err(|e| {
+            std::os::unix::fs::symlink(&new_image_path, &new_link_path).map_err(|e| {
                 Error::Context(
                     format!("create new symlink {}", new_link_path.display()),
                     Box::new(e),
                 )
             })?;
-        } else {
-            // Handle images in their actual pool directory
-            let new_base_name = format!("{}.qcow2", params.new_name);
-            let new_image_path = pool_directory.join(&new_base_name);
+        }
 
-            std::fs::rename(&existing_image_path, &new_image_path).map_err(|e| {
+        // Handle JSON file renaming (unified logic)
+        let old_json_path = existing_image_path.with_extension("json");
+        let new_json_path = new_image_path.with_extension("json");
+        if old_json_path.exists() {
+            std::fs::rename(&old_json_path, &new_json_path).map_err(|e| {
                 Error::Context(
                     format!(
-                        "rename: {} -> {}",
-                        existing_image_path.display(),
-                        new_image_path.display()
+                        "rename JSON file: {} -> {}",
+                        old_json_path.display(),
+                        new_json_path.display()
                     ),
                     Box::new(e),
                 )
