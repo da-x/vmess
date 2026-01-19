@@ -3357,6 +3357,28 @@ impl VMess {
             }
         }
 
+        for image in images_to_kill.iter() {
+            // Check if image is in a shared pool and force is not specified
+            let is_in_shared_pool = self
+                .config
+                .pools
+                .iter()
+                .any(|pool| pool.shared && image.pool_directory == pool.path);
+
+            if is_in_shared_pool && !params.force {
+                return Err(Error::FreeText(format!(
+                    "Cannot remove {} - image is in a shared pool. Use --force to override",
+                    image.rel_path.display()
+                )));
+            }
+        }
+
+        // Collect all lookup paths: pool_path, tmp_path, and pools
+        let mut lookup_paths = vec![self.config.pool_path.clone(), self.config.tmp_path.clone()];
+        for shared_pool in &self.config.pools {
+            lookup_paths.push(shared_pool.path.clone());
+        }
+
         // Process the found images
         for image in images_to_kill {
             // Generate display name for output
@@ -3409,6 +3431,12 @@ impl VMess {
 
             info!("Remove image files for {}", image_name);
 
+            let actual_image_path = image.get_absolute_path();
+            if std::fs::remove_file(&actual_image_path).is_ok() {
+                info!("Removed image file: {}", actual_image_path.display());
+            }
+
+            // Remove possible links
             let pool_image_path = self.config.pool_path.join(&image_path);
             let _ = std::fs::remove_file(&pool_image_path);
             let tmp_image_path = self.config.tmp_path.join(&image_path);
@@ -3417,8 +3445,30 @@ impl VMess {
             // Remove corresponding JSON file from the image's actual pool directory
             let image_stem = image_path.file_stem().unwrap().to_string_lossy();
             let actual_json_path = image.pool_directory.join(format!("{}.json", image_stem));
+
             if std::fs::remove_file(&actual_json_path).is_ok() {
                 info!("Removed JSON file: {}", actual_json_path.display());
+            }
+
+            // Remove possible tags pointing to image
+            let tag_target = format!("{}.qcow2", image_stem);
+            if let Some(tag_names) = pool.rev_tags.get(&image_stem.to_string()) {
+                for tag_name in tag_names {
+                    for pool in lookup_paths.iter() {
+                        let tag_path = format!("{}.qcow2", pool.join(tag_name).to_string_lossy());
+
+                        let target = match std::fs::read_link(&tag_path) {
+                            Ok(target) => target,
+                            Err(_) => continue,
+                        };
+
+                        if target.to_string_lossy() == tag_target {
+                            if std::fs::remove_file(&tag_path).is_ok() {
+                                info!("Removed tag {}", tag_path);
+                            }
+                        }
+                    }
+                }
             }
         }
 
