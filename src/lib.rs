@@ -414,11 +414,11 @@ pub struct Squash {
 
 #[derive(Debug, StructOpt, Clone)]
 pub struct Move {
-    /// Name of the shared pool to move the image to
-    pub pool: String,
-
     /// Full name of the image to move
     pub image: String,
+
+    /// Name of the shared pool to move the image to
+    pub pool: String,
 }
 
 #[derive(Debug, StructOpt, Clone)]
