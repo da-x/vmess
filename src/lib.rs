@@ -3321,7 +3321,7 @@ impl VMess {
         }
     }
 
-    fn kill(&mut self, params: Kill) -> Result<(), Error> {
+    pub fn kill(&mut self, params: Kill) -> Result<(), Error> {
         let pool = self.get_pool()?;
 
         // Collect images to kill - handle regex and exact match differently
@@ -3410,17 +3410,14 @@ impl VMess {
             info!("Remove image files for {}", image_name);
 
             let pool_image_path = self.config.pool_path.join(&image_path);
-            std::fs::remove_file(&pool_image_path)?;
+            let _ = std::fs::remove_file(&pool_image_path);
             let tmp_image_path = self.config.tmp_path.join(&image_path);
-            if tmp_image_path.exists() {
-                std::fs::remove_file(&tmp_image_path)?;
-            }
+            let _ = std::fs::remove_file(&tmp_image_path);
 
             // Remove corresponding JSON file from the image's actual pool directory
             let image_stem = image_path.file_stem().unwrap().to_string_lossy();
             let actual_json_path = image.pool_directory.join(format!("{}.json", image_stem));
-            if actual_json_path.exists() {
-                std::fs::remove_file(&actual_json_path)?;
+            if std::fs::remove_file(&actual_json_path).is_ok() {
                 info!("Removed JSON file: {}", actual_json_path.display());
             }
         }

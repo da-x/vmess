@@ -370,6 +370,20 @@ fn main_wrap() -> Result<()> {
     info!("✅ Successfully moved tag rocky-8-s to shared pool, rewriting existing tag");
     tree_images(&mut vmess)?;
 
+    test_title!("Test kill command with regex matching");
+
+    // Test killing all images matching 'modified-b'
+    info!("Testing kill command for images matching 'modified-b'");
+    let kill_params = vmess::Kill {
+        names: vec!["^modified-b.*".to_string()],
+        regex: true,
+        dry_run: false,
+        force: true,
+    };
+    vmess.kill(kill_params)?;
+    info!("✅ Successfully killed all images matching 'modified-b'");
+    tree_images(&mut vmess)?;
+
     test_title!("End of testing");
 
     cleanup_vms_in_test_dir(&test_dir)?;
