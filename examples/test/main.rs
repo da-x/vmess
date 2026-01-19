@@ -20,8 +20,59 @@ fn get_terminal_width() -> usize {
     }
 }
 
+fn log_directory_structure(test_name: &str) {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    let user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_string());
+    let test_dir = format!("/tmp/{}/vmess-testing", user);
+    let log_file = format!("{}/log.txt", test_dir);
+
+    info!(
+        "Logging directory structure at start of test '{}' to {}",
+        test_name, log_file
+    );
+
+    let output = Command::new("ls").args(&["-lR", &test_dir]).output();
+
+    match output {
+        Ok(result) => {
+            let stdout = String::from_utf8_lossy(&result.stdout);
+            let stderr = String::from_utf8_lossy(&result.stderr);
+
+            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_file) {
+                let _ = writeln!(
+                    file,
+                    "\n=== Directory structure at start of test '{}' ===",
+                    test_name
+                );
+
+                if !stdout.is_empty() {
+                    let _ = write!(file, "{}", stdout);
+                }
+
+                if !stderr.is_empty() {
+                    let _ = writeln!(file, "ERROR: {}", stderr.trim());
+                }
+
+                let _ = writeln!(
+                    file,
+                    "=== End of directory listing for '{}' ===\n",
+                    test_name
+                );
+            } else {
+                info!("Failed to open log file {}", log_file);
+            }
+        }
+        Err(e) => {
+            info!("Failed to list directory {}: {}", test_dir, e);
+        }
+    }
+}
+
 macro_rules! test_title {
     ($title:expr) => {
+        log_directory_structure($title);
         let width = get_terminal_width();
         println!("{}", Style::new().bold().paint("⎯".repeat(width)));
         info!(
@@ -253,11 +304,11 @@ fn main_wrap() -> Result<()> {
     tree_images(&mut vmess)?;
 
     test_title!("Test moving unfrozen image to shared");
-    
+
     // Fork modified-d but don't freeze it
     fork_modified(&mut vmess, "modified-d", "Modification for D")?;
     tree_images(&mut vmess)?;
-    
+
     // Try to move unfrozen modified-d to shared - should fail
     info!("Testing move validation - should fail because modified-d is not frozen");
     ensure!(
@@ -267,8 +318,12 @@ fn main_wrap() -> Result<()> {
     info!("✅ Move validation working correctly - failed as expected for unfrozen image");
 
     test_title!("Forking a shared cached image");
+
     // This overrides the second modification because we did not freeze it.
     check_cached(|| fork_modified(&mut vmess, "modified-b", "Modification for B"))?;
+
+    test_title!("Checking a cached override modification for B");
+
     // We are properly caching based on published images, this should return immediately.
     check_cached(|| fork_modified(&mut vmess, "modified-b", "Override modification for B"))?;
 
@@ -283,6 +338,39 @@ fn main_wrap() -> Result<()> {
     info!("Testing fork with publish on tagless cached image");
     check_cached(|| fork_with_publish(&mut vmess))?;
     info!("✅ Fork with publish worked even without tag - cached image found by changes");
+
+    test_title!("Test squashing to rocky-8-new-mod");
+
+    // Squash from published-image to rocky-8-new-mod
+    squash_to_new_mod(&mut vmess)?;
+    tree_images(&mut vmess)?;
+
+    test_title!("Test freezing and moving rocky-8-new-mod to shared");
+
+    // Freeze rocky-8-new-mod - this should create a rocky-8-new-mod tag
+    freeze(&mut vmess, "rocky-8-new-mod")?;
+    tree_images(&mut vmess)?;
+
+    // Move rocky-8-new-mod to shared pool, this will move the tag too
+    vmess.move_to("rocky-8-new-mod", "shared")?;
+    info!("✅ Successfully moved rocky-8-new-mod to shared pool");
+    tree_images(&mut vmess)?;
+
+    test_title!("Test new tag command");
+
+    // Create a local main pool tag 'rocky-8-s' pointing to the newly shared rocky-8-new-mod
+    vmess.tag("rocky-8-new-mod", "rocky-8-s")?;
+    info!("✅ Successfully created tag rocky-8-s pointing to rocky-8-new-mod");
+    tree_images(&mut vmess)?;
+
+    test_title!("Test move command rewriting tag in shared pool");
+
+    // Move the tag from main to shared - this should rewrite the tag in shared pool
+    vmess.move_to("rocky-8-s", "shared")?;
+    info!("✅ Successfully moved tag rocky-8-s to shared pool, rewriting existing tag");
+    tree_images(&mut vmess)?;
+
+    test_title!("End of testing");
 
     cleanup_vms_in_test_dir(&test_dir)?;
 
@@ -339,6 +427,20 @@ fn squash_modified_to_rocky_8_s(vmess: &mut vmess::VMess) -> Result<()> {
     vmess.squash(squash_params)?;
 
     log::info!("Successfully created rocky-8-s from modified");
+    Ok(())
+}
+
+fn squash_to_new_mod(vmess: &mut vmess::VMess) -> Result<()> {
+    log::info!("Squashing 'published-image' to create 'rocky-8-new-mod'");
+
+    let squash_params = Squash {
+        source: "published-image".to_string(),
+        destination: "rocky-8-new-mod".to_string(),
+    };
+
+    vmess.squash(squash_params)?;
+
+    log::info!("Successfully created rocky-8-new-mod from published-image");
     Ok(())
 }
 

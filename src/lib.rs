@@ -422,6 +422,15 @@ pub struct Move {
 }
 
 #[derive(Debug, StructOpt, Clone)]
+pub struct Tag {
+    /// Source image name to create tag from
+    pub source: String,
+
+    /// Tag name to create
+    pub tag: String,
+}
+
+#[derive(Debug, StructOpt, Clone)]
 pub enum CommandMode {
     New(New),
 
@@ -476,6 +485,9 @@ pub enum CommandMode {
 
     /// Squash an image into a new independent qcow2
     Squash(Squash),
+
+    /// Create a tag pointing to an existing image
+    Tag(Tag),
 
     /// Update SSH config based on DHCP of client VMs
     UpdateSsh(UpdateSshParams),
@@ -687,8 +699,8 @@ pub struct Pool {
 
     // Tag are just name aliases and they are managed by having
     // symlinks in the pool directory. See 'load_tags'.
-    tags: HashMap<String, TagInfo>,    // tag_name -> TagInfo
-    rev_tags: HashMap<String, String>, // image_name -> tag_name
+    tags: HashMap<String, TagInfo>,         // tag_name -> TagInfo
+    rev_tags: HashMap<String, Vec<String>>, // image_name -> tag_names
 }
 
 pub struct GetInfo<'a> {
@@ -743,7 +755,7 @@ impl Pool {
         Err(Error::NotFound(name.to_owned()))
     }
 
-    fn name_from_tag(&self, image: &Image) -> String {
+    fn name_from_tag(&self, image: &Image) -> Vec<String> {
         if image.frozen {
             // For the display name of frozen images that have tags pointing to them, this
             // helps showing the tag name instead of the long name@@hash.
@@ -754,7 +766,9 @@ impl Pool {
             }
         }
 
-        return strip_qcow2_suffix(&image.rel_path.to_string_lossy().into_owned());
+        return vec![strip_qcow2_suffix(
+            &image.rel_path.to_string_lossy().into_owned(),
+        )];
     }
 }
 
@@ -913,7 +927,7 @@ impl VMess {
                 self.freeze(params)?;
             }
             CommandMode::Move(params) => {
-                self.move_image(params)?;
+                self.move_image_or_tag(params)?;
             }
             CommandMode::Fork(params) => {
                 self.fork(params)?;
@@ -956,6 +970,9 @@ impl VMess {
             }
             CommandMode::Squash(params) => {
                 self.squash(params)?;
+            }
+            CommandMode::Tag(params) => {
+                self.tag(&params.source, &params.tag)?;
             }
             CommandMode::UpdateSsh(params) => {
                 self.update_ssh(params)?;
@@ -1369,7 +1386,7 @@ impl VMess {
             // For frozen images, use the tag name if available, otherwise use the image name
             let display_name = if image.frozen {
                 if let Some(tag_name) = pool.rev_tags.get(&image_stem.to_string()) {
-                    tag_name.clone()
+                    tag_name.join(" ")
                 } else {
                     image_name
                 }
@@ -1462,7 +1479,7 @@ impl VMess {
                     let disk_size = format!("{:.2} GB", image.size_mb as f32 / 1024.0);
                     let pool_name = image.get_pool_name(config);
                     let tag_info = if let Some(tag) = pool.rev_tags.get(&image_name.to_string()) {
-                        format!(" [tag: {}]", tag)
+                        format!(" [tag: {}]", tag.join(", "))
                     } else {
                         String::new()
                     };
@@ -1660,6 +1677,11 @@ impl VMess {
         if json_path.exists() {
             let frozen_json_name = format!("{}@@{}.json", image_name_stem, hash_hex);
             let frozen_json_path = existing.image.pool_directory.join(&frozen_json_name);
+            info!(
+                "Renaming {} to {}",
+                json_path.display(),
+                &frozen_json_path.display()
+            );
             std::fs::rename(&json_path, &frozen_json_path)
                 .with_context(|| format!("Failed to rename JSON file to frozen filename"))?;
         }
@@ -1684,13 +1706,7 @@ impl VMess {
     }
 
     pub fn squash(&mut self, params: Squash) -> Result<(), Error> {
-        use crate::utils::get_qcow2_backing_chain;
-        use log::{info, warn};
-
         let pool = self.get_pool()?;
-
-        // Check that the source image exists
-        let source_info = pool.get_by_name(&params.source)?;
 
         // Check that destination doesn't already exist
         if pool.get_by_name(&params.destination).is_ok() {
@@ -1707,12 +1723,14 @@ impl VMess {
                 params.destination
             )));
         }
-
+        // Check that the source image exists
+        let source_info = pool.get_by_name(&params.source)?;
         let source_path = source_info.image.get_absolute_path();
-        let dest_path = source_info
-            .image
-            .pool_directory
-            .join(format!("{}.qcow2", params.destination));
+
+        // Newly created images from squash, are created only in main pool, so
+        // they can be possibly worked on before freezing and/or moving to shared pool.
+        let dest_pool_path = &self.config.pool_path;
+        let dest_path = dest_pool_path.join(format!("{}.qcow2", params.destination));
 
         info!(
             "Squashing {} to {}",
@@ -1744,49 +1762,11 @@ impl VMess {
             )));
         }
 
-        // Merge VMInfo from entire backing chain
-        let lookup_paths = vec![source_info.image.pool_directory.clone()];
-        let mut merged_vm_info = VMInfo::default();
-
-        match get_qcow2_backing_chain(&source_path, &lookup_paths) {
-            Ok(chain_info) => {
-                info!(
-                    "Merging VMInfo from {} layers in backing chain",
-                    chain_info.chain.len()
-                );
-
-                // Merge VMInfo from each layer in the chain (starting from the root)
-                for layer in chain_info.chain.iter().rev() {
-                    let layer_name_raw = layer.basename.file_stem().unwrap().to_string_lossy();
-                    let json_path = layer.real_location.join(format!("{}.json", layer_name_raw));
-
-                    if json_path.exists() {
-                        match read_json_path(&json_path) {
-                            Ok(layer_vm_info) => {
-                                info!("Merging VMInfo from layer: {}", layer.basename.display());
-                                merged_vm_info.merge(&layer_vm_info);
-                            }
-                            Err(e) => {
-                                warn!("Failed to read VMInfo from {}: {}", json_path.display(), e);
-                            }
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to get backing chain for {}: {}",
-                    source_path.display(),
-                    e
-                );
-            }
-        }
+        // Use the already-loaded merged VMInfo from the pool
+        let merged_vm_info = source_info.image.merged_vm_info.clone();
 
         // Write merged VMInfo to the new squashed image's JSON file
-        let dest_json_path = source_info
-            .image
-            .pool_directory
-            .join(format!("{}.json", params.destination));
+        let dest_json_path = dest_pool_path.join(format!("{}.json", params.destination));
         write_json_path(&dest_json_path, &merged_vm_info)
             .with_context(|| format!("writing VMInfo to {}", dest_json_path.display()))?;
 
@@ -1797,7 +1777,7 @@ impl VMess {
         Ok(())
     }
 
-    pub fn move_image(&self, params: Move) -> Result<(), Error> {
+    pub fn move_image_or_tag(&self, params: Move) -> Result<(), Error> {
         use std::process;
 
         let pool = self.get_pool()?;
@@ -1818,6 +1798,88 @@ impl VMess {
                 "Target pool '{}' should be a shared one.",
                 params.pool
             )));
+        }
+
+        // Check if this is a tag pointing to an image already in the target pool
+        // If so, just manage the tag instead of moving the actual image
+        if let Some(tag_info) = pool.tags.get(&params.image) {
+            info!("Moving a tag '{}'", params.image);
+
+            // This is a tag - check if the target image is already in the target pool
+            if let Ok(target) = pool.get_by_name(&tag_info.image_name) {
+                if target.image.pool_directory == target_pool.path {
+                    info!(
+                        "Tag '{}' points to image '{}' already in target pool '{}', managing tag only",
+                        params.image, tag_info.image_name, params.pool
+                    );
+
+                    // Create/update tag in target pool
+                    let target_tag_path = target_pool.path.join(format!("{}.qcow2", params.image));
+
+                    // Remove existing tag if it exists
+                    if let Ok(symlink_metadata) = std::fs::symlink_metadata(&target_tag_path) {
+                        if symlink_metadata.file_type().is_symlink() {
+                            info!(
+                                "Removing old tag '{}' from shared pool '{}'",
+                                params.image, params.pool
+                            );
+
+                            std::fs::remove_file(&target_tag_path)?;
+                            info!("Removed existing tag '{}' in target pool", params.image);
+                        } else {
+                            return Err(Error::FreeText(format!(
+                                "Unexpected non-symlink '{}'",
+                                target_tag_path.display()
+                            )));
+                        }
+                    }
+
+                    // Remove original tag from source pool
+                    let source_tag_path = existing
+                        .image
+                        .pool_directory
+                        .join(format!("{}.qcow2", params.image));
+
+                    if std::fs::remove_file(&source_tag_path).is_ok() {
+                        info!(
+                            "Removed original tag '{}' from source pool - {}",
+                            params.image,
+                            source_tag_path.display()
+                        );
+                    }
+
+                    if target_pool.path != self.config.pool_path {
+                        let main_tag_path = self
+                            .config
+                            .pool_path
+                            .join(format!("{}.qcow2", params.image));
+                        if std::fs::remove_file(&main_tag_path).is_ok() {
+                            info!(
+                                "Removed original tag '{}' from main pool - {}",
+                                params.image,
+                                main_tag_path.display()
+                            );
+                        }
+                    }
+
+                    // Create new tag symlink in target pool pointing to the target image
+                    let target_rel_path = &existing.image.rel_path;
+                    std::os::unix::fs::symlink(target_rel_path, &target_tag_path)?;
+                    info!(
+                        "Created tag '{}' in target pool, point to {} at {}",
+                        params.image,
+                        target_rel_path.display(),
+                        target_tag_path.display(),
+                    );
+
+                    info!(
+                        "Successfully moved tag '{}' to shared pool '{}'",
+                        params.image, params.pool
+                    );
+
+                    return Ok(());
+                }
+            }
         }
 
         // Check that the image is in the main pool or tmp pool (not in a shared pool)
@@ -1969,14 +2031,32 @@ impl VMess {
         }
 
         // Recreate tag symlinks in target pool if they exist
-        if let Some(tag_name) = pool.rev_tags.get(&image_stem.to_string()) {
-            let new_tag_path = target_pool.path.join(format!("{}.qcow2", tag_name));
+        if let Some(tag_names) = pool.rev_tags.get(&image_stem.to_string()) {
+            for tag_name in tag_names {
+                let new_tag_path = target_pool.path.join(format!("{}.qcow2", tag_name));
 
-            // Create symlink in target pool
-            if let Err(e) = std::os::unix::fs::symlink(&existing.image.rel_path, &new_tag_path) {
-                warn!("Failed to create tag symlink in target pool: {}", e);
-            } else {
-                info!("Created tag '{}' in target pool", tag_name);
+                // Remove existing tag in target pool if it exists
+                if new_tag_path.exists() {
+                    if let Err(e) = std::fs::remove_file(&new_tag_path) {
+                        warn!(
+                            "Failed to remove existing tag '{}' in target pool: {}",
+                            tag_name, e
+                        );
+                    } else {
+                        info!(
+                            "Removed existing tag '{}' in target pool to rewrite it",
+                            tag_name
+                        );
+                    }
+                }
+
+                // Create symlink in target pool
+                if let Err(e) = std::os::unix::fs::symlink(&existing.image.rel_path, &new_tag_path)
+                {
+                    warn!("Failed to create tag symlink in target pool: {}", e);
+                } else {
+                    info!("Created/rewritten tag '{}' in target pool", tag_name);
+                }
             }
         }
 
@@ -1985,17 +2065,19 @@ impl VMess {
             .with_context(|| format!("Failed to remove original file {}", source_path.display()))?;
         info!("Removed original file: {}", source_path.display());
 
-        // Remove original tag symlink
-        if let Some(tag_name) = pool.rev_tags.get(&image_stem.to_string()) {
-            let old_tag_path = existing
-                .image
-                .pool_directory
-                .join(format!("{}.qcow2", tag_name));
-            if old_tag_path.is_symlink() {
-                if let Err(e) = std::fs::remove_file(&old_tag_path) {
-                    warn!("Failed to remove original tag symlink: {}", e);
-                } else {
-                    info!("Removed original tag symlink: {}", old_tag_path.display());
+        // Remove original tag symlinks
+        if let Some(tag_names) = pool.rev_tags.get(&image_stem.to_string()) {
+            for tag_name in tag_names {
+                let old_tag_path = existing
+                    .image
+                    .pool_directory
+                    .join(format!("{}.qcow2", tag_name));
+                if old_tag_path.is_symlink() {
+                    if let Err(e) = std::fs::remove_file(&old_tag_path) {
+                        warn!("Failed to remove original tag symlink: {}", e);
+                    } else {
+                        info!("Removed original tag symlink: {}", old_tag_path.display());
+                    }
                 }
             }
         }
@@ -2020,10 +2102,43 @@ impl VMess {
     }
 
     pub fn move_to(&mut self, image: &str, pool: &str) -> Result<(), Error> {
-        self.move_image(Move {
+        self.move_image_or_tag(Move {
             image: image.to_string(),
             pool: pool.to_string(),
         })
+    }
+
+    pub fn tag(&mut self, source: &str, tag: &str) -> Result<(), Error> {
+        use std::fs;
+
+        let pool = self.get_pool()?;
+
+        // Check that the source image exists
+        let existing = pool.get_by_name(source)?;
+
+        info!("Creating tag '{}' pointing to '{}'", tag, source);
+
+        // Create tag symlink in the main pool pointing to the source image
+        let main_pool_path = &self.config.pool_path;
+        let source_path = &existing.image.rel_path;
+        let tag_path = main_pool_path.join(format!("{}.qcow2", tag));
+
+        // Remove existing tag if it exists
+        if tag_path.exists() {
+            fs::remove_file(&tag_path)?;
+            info!("Removed existing tag: {}", tag_path.display());
+        }
+
+        // Create symlink
+        std::os::unix::fs::symlink(&source_path, &tag_path)?;
+
+        info!(
+            "Created tag symlink: {} -> {}",
+            tag_path.display(),
+            source_path.display()
+        );
+
+        Ok(())
     }
 
     fn get_template(&self, name: &str) -> Result<Element, Error> {
@@ -2566,11 +2681,13 @@ impl VMess {
             let mut longest_length = 0;
 
             for image in pool.get_all_images() {
-                let prefix_name = format!("{}.", pool.name_from_tag(image).replace("%", "."));
-                if new_full_name.starts_with(&prefix_name) {
-                    if prefix_name.len() > longest_length {
-                        longest_length = prefix_name.len();
-                        longest_match = Some(image);
+                for tag in pool.name_from_tag(image) {
+                    let prefix_name = format!("{}.", tag.replace("%", "."));
+                    if new_full_name.starts_with(&prefix_name) {
+                        if prefix_name.len() > longest_length {
+                            longest_length = prefix_name.len();
+                            longest_match = Some(image);
+                        }
                     }
                 }
             }
@@ -2594,7 +2711,7 @@ impl VMess {
                 if vm.stats.state != VirDomainState::NoState {
                     return Err(Error::FreeText(format!(
                         "Cannot fork from parent '{}' - VM '{}' is in state {:?}.",
-                        pool.name_from_tag(parent),
+                        parent.rel_path.display(),
                         vm_using,
                         vm.stats.state,
                     )));
@@ -2625,8 +2742,10 @@ impl VMess {
                     let tag_symlink_path =
                         self.config.pool_path.join(format!("{}.qcow2", params.name));
                     let frozen_path = format!("{}.qcow2", sub_name);
+                    let json_path = self.config.pool_path.join(format!("{}.json", params.name));
 
                     let _ = std::fs::remove_file(&tag_symlink_path);
+                    let _ = std::fs::remove_file(&json_path);
                     std::os::unix::fs::symlink(&frozen_path, &tag_symlink_path).with_context(
                         || {
                             format!(
@@ -2902,7 +3021,7 @@ impl VMess {
                 })?;
 
                 // Move to the shared pool
-                self.move_image(Move {
+                self.move_image_or_tag(Move {
                     image: params.name.clone(),
                     pool: shared_pool_name.clone(),
                 })?;
@@ -3534,7 +3653,10 @@ impl Pool {
                     shared,
                 };
                 self.tags.insert(tag_name.clone(), tag_info);
-                self.rev_tags.insert(image_name, tag_name);
+                self.rev_tags
+                    .entry(image_name)
+                    .or_insert_with(Vec::new)
+                    .push(tag_name);
             }
         }
 
