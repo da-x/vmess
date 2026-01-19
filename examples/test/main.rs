@@ -252,6 +252,20 @@ fn main_wrap() -> Result<()> {
 
     tree_images(&mut vmess)?;
 
+    test_title!("Test moving unfrozen image to shared");
+    
+    // Fork modified-d but don't freeze it
+    fork_modified(&mut vmess, "modified-d", "Modification for D")?;
+    tree_images(&mut vmess)?;
+    
+    // Try to move unfrozen modified-d to shared - should fail
+    info!("Testing move validation - should fail because modified-d is not frozen");
+    ensure!(
+        vmess.move_to("modified-d", "shared").is_err(),
+        "Moving modified-d should fail because it is not frozen"
+    );
+    info!("✅ Move validation working correctly - failed as expected for unfrozen image");
+
     test_title!("Forking a shared cached image");
     // This overrides the second modification because we did not freeze it.
     check_cached(|| fork_modified(&mut vmess, "modified-b", "Modification for B"))?;

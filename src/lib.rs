@@ -1826,6 +1826,14 @@ impl VMess {
             )));
         }
 
+        // Check that the image is frozen before moving to shared pool
+        if !existing.image.frozen {
+            return Err(Error::FreeText(format!(
+                "Image '{}' is not frozen. Only frozen images can be moved to shared pools.",
+                params.image
+            )));
+        }
+
         // Get the backing chain and validate all images are in the target shared pool
         let backing_chain = pool.get_backing_chain_by_name(&params.image)?;
 
