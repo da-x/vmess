@@ -676,6 +676,7 @@ struct VM {
 pub struct TagInfo {
     pub image_name: String,
     pub pool_name: String,
+    pub shared: bool,
 }
 
 #[derive(Debug)]
@@ -1203,10 +1204,10 @@ impl VMess {
 
         // Build a mapping from path to pool name for load_tags
         let mut path_to_pool = std::collections::HashMap::new();
-        path_to_pool.insert(self.config.pool_path.clone(), "main".to_string());
-        path_to_pool.insert(self.config.tmp_path.clone(), "tmp".to_string());
-        for shared_pool in &self.config.pools {
-            path_to_pool.insert(shared_pool.path.clone(), shared_pool.name.clone());
+        path_to_pool.insert(self.config.pool_path.clone(), ("main".to_string(), false));
+        path_to_pool.insert(self.config.tmp_path.clone(), ("tmp".to_string(), false));
+        for pool in &self.config.pools {
+            path_to_pool.insert(pool.path.clone(), (pool.name.clone(), pool.shared));
         }
 
         pool.load_tags(lookup_paths, path_to_pool)?;
@@ -3474,9 +3475,9 @@ impl Pool {
     fn load_tags(
         &mut self,
         lookup_paths: Vec<PathBuf>,
-        path_to_pool: std::collections::HashMap<PathBuf, String>,
+        path_to_pool: std::collections::HashMap<PathBuf, (String, bool)>,
     ) -> Result<(), Error> {
-        Ok(for lookup_path in &lookup_paths {
+        for lookup_path in &lookup_paths {
             for entry in std::fs::read_dir(lookup_path)
                 .with_context(|| format!("reading directory {} for tags", lookup_path.display()))?
             {
@@ -3531,20 +3532,23 @@ impl Pool {
                 }
 
                 // Find the pool name for this lookup path
-                let pool_name = path_to_pool
+                let (pool_name, shared) = path_to_pool
                     .get(lookup_path)
                     .cloned()
-                    .unwrap_or_else(|| "unknown".to_string());
+                    .unwrap_or_else(|| ("unknown".to_string(), false));
 
                 // Add to tags maps
                 let tag_info = TagInfo {
                     image_name: image_name.clone(),
                     pool_name,
+                    shared,
                 };
                 self.tags.insert(tag_name.clone(), tag_info);
                 self.rev_tags.insert(image_name, tag_name);
             }
-        })
+        }
+
+        Ok(())
     }
 }
 
