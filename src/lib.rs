@@ -646,6 +646,7 @@ impl ImageCollection {
 
 #[derive(Debug)]
 pub struct Image {
+    // The filename of the image, includes qcow2 and @@hash if they exists.
     rel_path: PathBuf,
     pool_directory: PathBuf,
     vm_info: VMInfo,
@@ -744,6 +745,9 @@ impl Pool {
 
     fn name_from_tag(&self, image: &Image) -> String {
         if image.frozen {
+            // For the display name of frozen images that have tags pointing to them, this
+            // helps showing the tag name instead of the long name@@hash.
+
             let image_stem = image.rel_path.file_stem().unwrap().to_string_lossy();
             if let Some(tag_name) = self.rev_tags.get(&image_stem.to_string()) {
                 return tag_name.clone();
@@ -3063,61 +3067,47 @@ impl VMess {
             )));
         }
 
-        // Check if this is a frozen image accessed via a tag
-        if existing.image.frozen {
-            if let Some(_) = pool.tags.get(&params.name) {
-                // Find and rename the tag symlink
-                let old_tag_path = existing
-                    .image
-                    .pool_directory
-                    .join(format!("{}.qcow2", params.name));
-                let new_tag_path = existing
-                    .image
-                    .pool_directory
-                    .join(format!("{}.qcow2", params.new_name));
+        // If accssed via a tag, we are only renaming the tag, regadless of whether it is frozen or
+        // not.
+        if let Some(_) = pool.tags.get(&params.name) {
+            // Find and rename the tag symlink
+            let old_tag_path = existing
+                .image
+                .pool_directory
+                .join(format!("{}.qcow2", params.name));
+            let new_tag_path = existing
+                .image
+                .pool_directory
+                .join(format!("{}.qcow2", params.new_name));
 
-                if old_tag_path.exists() && old_tag_path.is_symlink() {
-                    // Read the symlink target
-                    let target = std::fs::read_link(&old_tag_path).map_err(|e| {
-                        Error::Context(
-                            format!("read symlink {}", old_tag_path.display()),
-                            Box::new(e),
-                        )
-                    })?;
+            if old_tag_path.exists() && old_tag_path.is_symlink() {
+                let _ = std::fs::remove_file(&new_tag_path);
 
-                    // Remove old symlink
-                    std::fs::remove_file(&old_tag_path).map_err(|e| {
-                        Error::Context(
-                            format!("remove tag symlink {}", old_tag_path.display()),
-                            Box::new(e),
-                        )
-                    })?;
+                // Remove old symlink
+                std::fs::rename(&old_tag_path, &new_tag_path).map_err(|e| {
+                    Error::Context(
+                        format!("remove tag symlink {}", old_tag_path.display()),
+                        Box::new(e),
+                    )
+                })?;
 
-                    // Create new symlink
-                    std::os::unix::fs::symlink(&target, &new_tag_path).map_err(|e| {
-                        Error::Context(
-                            format!("create new tag symlink {}", new_tag_path.display()),
-                            Box::new(e),
-                        )
-                    })?;
-
-                    info!(
-                        "Renamed tag '{}' to '{}' for frozen image",
-                        params.name, params.new_name
-                    );
-                    return Ok(());
-                } else {
-                    return Err(Error::FreeText(format!(
-                        "Cannot rename frozen image {} - no tag symlink found",
-                        params.name
-                    )));
-                }
+                info!(
+                    "Renamed tag '{}' to '{}' for frozen image",
+                    params.name, params.new_name
+                );
+                return Ok(());
             } else {
                 return Err(Error::FreeText(format!(
-                    "Cannot rename frozen image {} directly. Frozen images can only have their tags renamed",
+                    "Cannot rename frozen image {} - no tag symlink found",
                     params.name
                 )));
             }
+        }
+
+        if !existing.image.sub.is_empty() {
+            return Err(Error::FreeText(format!(
+                "Cannot rename image that has subimages",
+            )));
         }
 
         // Handle non-frozen images
