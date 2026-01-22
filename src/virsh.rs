@@ -46,7 +46,8 @@ fn virsh_domstats_with_retry(cmd: &str) -> Result<String, Error> {
     loop {
         match bash_stdout(cmd.to_string()) {
             Ok(output) => return Ok(output),
-            Err(Error::CommandError(_, stderr)) if stderr.contains("Connection reset by peer") => {
+            Err(Error::CommandError(_, stderr)) if stderr.contains("Connection reset by peer") 
+                || stderr.contains("Broken pipe") => {
                 thread::sleep(RETRY_DELAY);
                 continue;
             }
