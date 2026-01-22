@@ -55,6 +55,18 @@ fn virsh_domstats_with_retry(cmd: &str) -> Result<String, Error> {
     }
 }
 
+pub fn virsh_destroy_forgiving(domain_name: &str) -> Result<(), Error> {
+    let cmd = format!("virsh destroy {}", domain_name);
+    match bash_stdout(cmd.clone()) {
+        Ok(_) => Ok(()),
+        Err(Error::CommandError(_, stderr)) if stderr.contains("error: failed to get domain") => {
+            // Domain doesn't exist, which is fine for destroy operation
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct KVMStats {
     pub block_paths: Vec<String>,

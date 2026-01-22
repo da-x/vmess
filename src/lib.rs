@@ -38,7 +38,7 @@ use crate::utils::read_json_path;
 use crate::utils::write_json_path;
 use crate::utils::AddExtension;
 use crate::utils::{adjust_path_by_env, make_ssh, remote_shell_no_stderr};
-use crate::virsh::{get_all_stats, get_batch_network_info, VirDomainState};
+use crate::virsh::{get_all_stats, get_batch_network_info, virsh_destroy_forgiving, VirDomainState};
 use fstrings::*;
 
 use crate::query::{MatchInfo, VMState};
@@ -2779,7 +2779,7 @@ impl VMess {
                 if let Some(vm) = &existing.vm {
                     info!("Removing VM (state {:?})", existing.image.sub.get("State"));
                     let vmname_prefix = self.get_vm_prefix();
-                    let r1 = ibash_stdout!("virsh destroy {vmname_prefix}{vm.name}");
+                    let r1 = virsh_destroy_forgiving(&format!("{vmname_prefix}{}", vm.name));
                     let r2 = ibash_stdout!("virsh undefine --nvram {vmname_prefix}{vm.name}");
 
                     if r1.is_err() && r2.is_err() {
@@ -3424,7 +3424,7 @@ impl VMess {
                         ibash_stdout!("virsh undefine --nvram {vmname_prefix}{vm.name}")?;
                     }
                     _ => {
-                        ibash_stdout!("virsh destroy {vmname_prefix}{vm.name}")?;
+                        virsh_destroy_forgiving(&format!("{vmname_prefix}{}", vm.name))?;
                     }
                 }
             }
