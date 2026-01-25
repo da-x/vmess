@@ -2952,6 +2952,8 @@ impl VMess {
             }
         }
 
+        let json_path = new.with_extension("json");
+
         let base_template_provided = params.base_template.is_some();
         if let Some(template) = params.base_template {
             self.spawn(Spawn {
@@ -2964,6 +2966,20 @@ impl VMess {
                 overrides: params.overrides.clone(),
                 new_size: None,
             })?;
+        } else {
+            if let Some(_) = &params.script {
+                return Err(Error::FreeText(
+                    "Makes no sense specifying a script without a spawn template".to_string(),
+                ));
+            }
+
+            // Write empty JSON file, no changes yet
+            let vm_info = VMInfo::default();
+            write_json_path(json_path.clone(), &vm_info).with_context(|| {
+                format!("Failed to write changes JSON file: {}", json_path.display())
+            })?;
+
+            return Ok(());
         }
 
         // Execute script if provided
@@ -2975,8 +2991,6 @@ impl VMess {
                     "Script execution requires --base-template to be specified".to_string(),
                 ));
             }
-
-            let json_path = new.with_extension("json");
 
             let vm_name: &str = &params.name;
             let changes_text: &str = changes_text;
