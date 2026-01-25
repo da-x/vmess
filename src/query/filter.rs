@@ -10,6 +10,7 @@ pub enum VMState {
 pub enum Expr {
     Substring(String),
     State(VMState),
+    Pool(String),
     All,
     Not(Box<Expr>),
     And(Box<Expr>, Box<Expr>),
@@ -19,6 +20,7 @@ pub enum Expr {
 pub struct MatchInfo<'a> {
     pub vm_state: Option<VMState>,
     pub name: &'a str,
+    pub pool_name: Option<&'a str>,
 }
 
 impl Expr {
@@ -50,6 +52,9 @@ impl Expr {
             }
             Expr::State(state) => {
                 return info.vm_state == Some(*state);
+            }
+            Expr::Pool(pool_name) => {
+                return info.pool_name == Some(pool_name.as_str());
             }
             Expr::All => true,
             Expr::Not(a) => !a.match_info(info),

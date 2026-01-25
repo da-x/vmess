@@ -28,12 +28,17 @@ subexpr3 : Expr = {
 lowexpr : Expr = {
     "running" => Expr::State(VMState::Running),
     "stopped" => Expr::State(VMState::Stopped),
+    pool_expr => <>,
     string => Expr::Substring(<>),
     "(" <e:top> ")" => e,
 }
 
 number: u64 = {
     <s:r"[0-9]+"> => s.parse().unwrap()
+}
+
+pool_expr: Expr = {
+    <s:r#"pool==[^ ]+"#> => Expr::Pool(s[6..].to_owned()),
 }
 
 string: String = {

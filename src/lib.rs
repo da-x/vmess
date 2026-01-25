@@ -43,8 +43,6 @@ use crate::virsh::{
 };
 use fstrings::*;
 
-use crate::query::{MatchInfo, VMState};
-
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("Io error: {0}")]
@@ -232,19 +230,22 @@ pub struct Exists {
 
 #[derive(Debug, StructOpt, Clone, Default)]
 pub struct Kill {
+    #[structopt(long = "filter")]
+    pub filter: Vec<String>,
+
     /// List of the full names of the domains to kill
     pub names: Vec<String>,
 
     /// Use regex matching for the given names
-    #[structopt(name = "regex", short = "E")]
+    #[structopt(long = "regex", short = "E")]
     pub regex: bool,
 
     /// Do not remove, just print the matching names
-    #[structopt(name = "dry_run", short = "n")]
+    #[structopt(long = "dry_run", short = "n")]
     pub dry_run: bool,
 
     /// Force operation (kill the VM even if it is running)
-    #[structopt(name = "force", short = "f")]
+    #[structopt(long = "force", short = "f")]
     pub force: bool,
 }
 
@@ -391,7 +392,7 @@ pub struct List {
 
 #[derive(Debug, StructOpt, Clone)]
 pub struct Tree {
-    #[structopt(name = "filter")]
+    #[structopt(long = "filter")]
     pub filter: Vec<String>,
 }
 
@@ -826,6 +827,37 @@ impl Image {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string()
+        }
+    }
+
+    fn get_vm_state(&self, pool: &Pool) -> Option<crate::query::VMState> {
+        use crate::virsh::VirDomainState;
+
+        if let Some(vm_using) = &self.vm_using {
+            if let Some(vm) = pool.vms.get(vm_using) {
+                match vm.stats.state {
+                    VirDomainState::Running => Some(crate::query::VMState::Running),
+                    VirDomainState::Shutoff => Some(crate::query::VMState::Stopped),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    fn get_match_info<'a>(
+        &'a self,
+        pool: &Pool,
+        name: &'a str,
+        pool_name: &'a str,
+    ) -> crate::query::MatchInfo<'a> {
+        crate::query::MatchInfo {
+            vm_state: self.get_vm_state(pool),
+            name,
+            pool_name: Some(pool_name),
         }
     }
 }
@@ -1360,14 +1392,7 @@ impl VMess {
                 row.add_cell(Cell::new(s));
             }
 
-            let mi = MatchInfo {
-                vm_state: match vm_state {
-                    "running" => Some(VMState::Running),
-                    "shut off" => Some(VMState::Stopped),
-                    _ => None,
-                },
-                name: &path,
-            };
+            let mi = image.get_match_info(pool, &path, &pool_name);
 
             if filter_expr.match_info(&mi) {
                 table.add_row(row);
@@ -1430,24 +1455,18 @@ impl VMess {
             config: &Config,
             filter_expr: &query::Expr,
             prefix: &str,
-            _is_last: bool,
         ) {
             let images: Vec<_> = image_collection.iter_direct_sub().collect();
 
-            for (i, (_name, image)) in images.iter().enumerate() {
+            for (i, (_, image)) in images.iter().enumerate() {
                 let is_last_item = i == images.len() - 1;
 
                 // Generate display name for this image
                 let image_name = image.rel_path.file_stem().unwrap().to_string_lossy();
 
                 // Check if this image matches the filter
-                let (vm_state, vm_info) = if let Some(vm_using) = &image.vm_using {
+                let vm_info = if let Some(vm_using) = &image.vm_using {
                     if let Some(vm) = pool.vms.get(vm_using) {
-                        let vm_state = match vm.stats.state {
-                            VirDomainState::Running => Some(crate::query::VMState::Running),
-                            VirDomainState::Shutoff => Some(crate::query::VMState::Stopped),
-                            _ => None,
-                        };
                         let state_str = match vm.stats.state {
                             VirDomainState::Running => "running",
                             VirDomainState::Shutoff => "shut off",
@@ -1459,18 +1478,16 @@ impl VMess {
                             VirDomainState::NoState => "",
                             VirDomainState::Unknown => "unknown",
                         };
-                        (vm_state, format!(" ({})", state_str))
+                        format!(" ({})", state_str)
                     } else {
-                        (None, String::new())
+                        String::new()
                     }
                 } else {
-                    (None, String::new())
+                    String::new()
                 };
 
-                let mi = crate::query::MatchInfo {
-                    vm_state,
-                    name: &image_name,
-                };
+                let pool_name = image.get_pool_name(config);
+                let mi = image.get_match_info(pool, &image_name, &pool_name);
 
                 if filter_expr.match_info(&mi) {
                     // Print tree structure symbols
@@ -1483,7 +1500,6 @@ impl VMess {
                     // Print image info
                     let frozen_indicator = if image.frozen { " [FROZEN]" } else { "" };
                     let disk_size = format!("{:.2} GB", image.size_mb as f32 / 1024.0);
-                    let pool_name = image.get_pool_name(config);
                     let tag_info = if let Some(tag) = pool.rev_tags.get(&image_name.to_string()) {
                         format!(" [tag: {}]", tag.join(", "))
                     } else {
@@ -1517,13 +1533,13 @@ impl VMess {
                         format!("{}│   ", prefix)
                     };
 
-                    print_image_tree(&image.sub, pool, config, filter_expr, &next_prefix, true);
+                    print_image_tree(&image.sub, pool, config, filter_expr, &next_prefix);
                 }
             }
         }
 
         println!("VM Image Tree:");
-        print_image_tree(&pool.images, &pool, &self.config, &filter_expr, "", true);
+        print_image_tree(&pool.images, &pool, &self.config, &filter_expr, "");
 
         // Display loaded tags
         if !pool.tags.is_empty() {
@@ -3330,35 +3346,61 @@ impl VMess {
     pub fn kill(&mut self, params: Kill) -> Result<(), Error> {
         let pool = self.get_pool()?;
 
+        let filter_expr =
+            query::Expr::parse_cmd(&params.filter).with_context(|| format!("during parse cmd"))?;
+
         // Collect images to kill - handle regex and exact match differently
         let mut images_to_kill = Vec::new();
 
-        if params.regex {
-            // For regex mode, match against display names
-            for image in pool.get_all_images() {
-                let image_stem = image.rel_path.file_stem().unwrap().to_string_lossy();
-                let image_name_rep = image_stem.replace('%', ".");
-                for pattern in params.names.iter() {
-                    let regex = Regex::new(pattern)?;
-                    if regex.is_match(&image_name_rep) || regex.is_match(&image_stem) {
-                        images_to_kill.push(image);
-                        break;
+        if params.names.len() > 0 {
+            if params.regex {
+                // For regex mode, match against display names
+                for image in pool.get_all_images() {
+                    let image_stem = image.rel_path.file_stem().unwrap().to_string_lossy();
+                    let image_name_rep = image_stem.replace('%', ".");
+                    for pattern in params.names.iter() {
+                        let regex = Regex::new(pattern)?;
+                        if regex.is_match(&image_name_rep) || regex.is_match(&image_stem) {
+                            let pool_name = image.get_pool_name(&self.config);
+                            let mi = image.get_match_info(&pool, &image_name_rep, &pool_name);
+
+                            if filter_expr.match_info(&mi) {
+                                images_to_kill.push(image);
+                            }
+                            break;
+                        }
+                    }
+                }
+            } else {
+                // Exact match mode
+                for name in params.names.iter() {
+                    let image_name_rep = name.replace('%', ".");
+                    for name in [name, &image_name_rep] {
+                        match pool.images.find_by_name(name) {
+                            Some(image) => {
+                                let pool_name = image.get_pool_name(&self.config);
+                                let mi = image.get_match_info(&pool, name, &pool_name);
+
+                                if filter_expr.match_info(&mi) {
+                                    images_to_kill.push(image);
+                                }
+                            }
+                            None => {
+                                return Err(Error::NotFound(name.to_string()));
+                            }
+                        }
                     }
                 }
             }
-        } else {
-            // Exact match mode
-            for name in params.names.iter() {
-                let image_name_rep = name.replace('%', ".");
-                for name in [name, &image_name_rep] {
-                    match pool.images.find_by_name(name) {
-                        Some(image) => {
-                            images_to_kill.push(image);
-                        }
-                        None => {
-                            return Err(Error::NotFound(name.to_string()));
-                        }
-                    }
+        } else if params.filter.len() > 0 {
+            for image in pool.get_all_images() {
+                let pool_name = image.get_pool_name(&self.config);
+                let image_stem = image.rel_path.file_stem().unwrap().to_string_lossy();
+                let image_name_rep = image_stem.replace('%', ".");
+                let mi = image.get_match_info(&pool, &image_name_rep, &pool_name);
+
+                if filter_expr.match_info(&mi) {
+                    images_to_kill.push(image);
                 }
             }
         }
