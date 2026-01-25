@@ -38,7 +38,9 @@ use crate::utils::read_json_path;
 use crate::utils::write_json_path;
 use crate::utils::AddExtension;
 use crate::utils::{adjust_path_by_env, make_ssh, remote_shell_no_stderr};
-use crate::virsh::{get_all_stats, get_batch_network_info, virsh_destroy_forgiving, VirDomainState};
+use crate::virsh::{
+    get_all_stats, get_batch_network_info, virsh_destroy_forgiving, VirDomainState,
+};
 use fstrings::*;
 
 use crate::query::{MatchInfo, VMState};
@@ -1131,6 +1133,10 @@ impl VMess {
         let mut backing_chains: Vec<_> = Vec::new();
 
         for lookup_path in &lookup_paths {
+            if !lookup_path.exists() {
+                continue;
+            }
+
             for entry in std::fs::read_dir(&lookup_path)
                 .with_context(|| format!("reading directory {}", lookup_path.display()))?
             {
@@ -3634,6 +3640,10 @@ impl Pool {
         path_to_pool: std::collections::HashMap<PathBuf, (String, bool)>,
     ) -> Result<(), Error> {
         for lookup_path in &lookup_paths {
+            if !lookup_path.exists() {
+                continue;
+            }
+
             for entry in std::fs::read_dir(lookup_path)
                 .with_context(|| format!("reading directory {} for tags", lookup_path.display()))?
             {
