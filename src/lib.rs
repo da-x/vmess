@@ -33,6 +33,7 @@ pub mod virsh;
 
 use crate::utils::calculate_hash;
 use crate::utils::get_qcow2_backing_chain;
+use crate::utils::is_default;
 use crate::utils::is_version_at_least;
 use crate::utils::read_json_path;
 use crate::utils::write_json_path;
@@ -286,38 +287,47 @@ pub struct Console {
     name: String,
 }
 
-#[derive(Debug, StructOpt, Clone, Default)]
+#[derive(Debug, StructOpt, Clone, Default, Serialize)]
 pub struct Overrides {
     /// Override GB of memory
     #[structopt(name = "memory", short = "m", long = "mem")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub memory_gb: Option<u32>,
 
     /// Override number of CPUs
     #[structopt(name = "cpus", short = "c", long = "cpus")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub nr_cpus: Option<u32>,
 
     /// Host devices from VF pools
     #[structopt(name = "netdevs", long = "netdev")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub netdevs: Vec<String>,
 
     /// Host devices from VF pools
     #[structopt(long)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub cdrom: Option<PathBuf>,
 
     #[structopt(long)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub usb: Option<PathBuf>,
 
     #[structopt(long)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub uefi: bool,
 
     #[structopt(long)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub secure_boot: bool,
 
     #[structopt(long)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub stop_on_reboot: bool,
 
     /// Increase main image size to this amount
     #[structopt(long)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub image_size: Option<byte_unit::Byte>,
 }
 
