@@ -2487,7 +2487,7 @@ impl VMess {
 
         if let Some(name) = xml.get_mut_child("name") {
             let vm = params.full.clone();
-            let prefixed_vm_name = format!("{}{}", vmname_prefix, vm);
+            let prefixed_vm_name = self.get_vm_name(&vm);
             name.children[0] = XMLNode::Text(prefixed_vm_name);
         }
 
@@ -2507,7 +2507,7 @@ impl VMess {
             }
         }
 
-        let full_name = format!("{vmname_prefix}{}", params.full);
+        let full_name = self.get_vm_name(&params.full);
 
         Self::modify_xml_using_overrides(&mut xml, &params.overrides, full_name.as_str())?;
 
@@ -2559,16 +2559,19 @@ impl VMess {
         Ok(())
     }
 
+    pub fn get_vm_name(&self, name: &str) -> String {
+        format!("{}{}", self.get_vm_prefix(), name)
+    }
+
     fn modify(&mut self, params: Modify) -> Result<(), Error> {
         let pool = self.get_pool()?;
 
         let existing = pool.get_by_name(&params.full)?;
 
         if let Some(vm) = &existing.vm {
-            let vmname_prefix = self.get_vm_prefix();
-            let contents = ibash_stdout!("virsh dumpxml {vmname_prefix}{vm.name}")?;
+            let contents = ibash_stdout!("virsh dumpxml {}", self.get_vm_name(&vm.name))?;
             let mut xml = Element::parse(contents.as_bytes())?;
-            let full_name = format!("{vmname_prefix}{}", params.full);
+            let full_name = self.get_vm_name(&params.full);
 
             Self::modify_xml_using_overrides(&mut xml, &params.overrides, full_name.as_str())?;
 
@@ -2595,10 +2598,8 @@ impl VMess {
     }
 
     fn undefine(&self, params: Undefine) -> Result<(), Error> {
-        let vmname_prefix = self.get_vm_prefix();
-
         for name in &params.names {
-            ibash_stdout!("virsh undefine --nvram {vmname_prefix}{name}")?;
+            ibash_stdout!("virsh undefine --nvram {}", self.get_vm_name(name))?;
         }
 
         Ok(())
@@ -2810,9 +2811,8 @@ impl VMess {
             if params.force {
                 if let Some(vm) = &existing.vm {
                     info!("Removing VM (state {:?})", existing.image.sub.get("State"));
-                    let vmname_prefix = self.get_vm_prefix();
-                    let r1 = virsh_destroy_forgiving(&format!("{vmname_prefix}{}", vm.name));
-                    let r2 = ibash_stdout!("virsh undefine --nvram {vmname_prefix}{vm.name}");
+                    let r1 = virsh_destroy_forgiving(&self.get_vm_name(&vm.name));
+                    let r2 = ibash_stdout!("virsh undefine --nvram {}", self.get_vm_name(&vm.name));
 
                     if r1.is_err() && r2.is_err() {
                         r2?;
@@ -3149,9 +3149,8 @@ impl VMess {
             return Err(Error::HasSubImages(params.name.clone(), "start"));
         }
 
-        let vmname_prefix = self.get_vm_prefix();
         if let Some(vm) = &existing.vm {
-            ibash_stdout!("virsh start {vmname_prefix}{vm.name}")?;
+            ibash_stdout!("virsh start {}", self.get_vm_name(&vm.name))?;
         } else {
             return Err(Error::NoVMDefined(params.name));
         }
@@ -3162,10 +3161,9 @@ impl VMess {
     fn stop(&self, params: Stop) -> Result<(), Error> {
         let pool = self.get_pool()?;
 
-        let vmname_prefix = self.get_vm_prefix();
         let existing = pool.get_by_name(&params.name)?;
         if let Some(vm) = &existing.vm {
-            ibash_stdout!("virsh shutdown {vmname_prefix}{vm.name}")?;
+            ibash_stdout!("virsh shutdown {}", self.get_vm_name(&vm.name))?;
         } else {
             return Err(Error::NoVMDefined(params.name));
         }
@@ -3178,16 +3176,13 @@ impl VMess {
 
         let existing = pool.get_by_name(&params.name)?;
         if let Some(vm) = &existing.vm {
-            let vmname_prefix = self.get_vm_prefix();
-
-            ibash_stdout!("virsh shutdown {vmname_prefix}{vm.name}")?;
+            ibash_stdout!("virsh shutdown {}", self.get_vm_name(&vm.name))?;
 
             while let Err(_) = ibash_stdout!(
-                "virsh list --state-shutoff --name | grep -E '^{vmname_prefix}{vm.name}$'"
+                "virsh list --state-shutoff --name | grep -E '^{}$'", self.get_vm_name(&vm.name)
             ) {
                 if let Err(_) = ibash_stdout!(
-                    "virsh list --name | grep -E '^{vmname_prefix}{vmname}$'",
-                    vmname = vm.name
+                    "virsh list --name | grep -E '^{}$'", self.get_vm_name(&vm.name)
                 ) {
                     // Volatile VMs disappear
                     break;
@@ -3341,8 +3336,7 @@ impl VMess {
 
         let existing = pool.get_by_name(&params.name)?;
         if let Some(vm) = &existing.vm {
-            let vmname_prefix = self.get_vm_prefix();
-            let vm = format!("{vmname_prefix}{}", vm.name);
+            let vm = self.get_vm_name(&vm.name);
             let mut v = Command::new("virsh").arg("console").arg(&vm).spawn()?;
             let _status = v.wait()?;
         } else {
@@ -3357,8 +3351,7 @@ impl VMess {
 
         let existing = pool.get_by_name(&fullname)?;
         if let Some(vm) = &existing.vm {
-            let vmname_prefix = self.get_vm_prefix();
-            let vm = format!("{vmname_prefix}{}", vm.name);
+            let vm = self.get_vm_name(&vm.name);
             let mut command = Command::new("virsh");
             command.arg("console").arg(&vm);
             return Ok(command);
@@ -3490,13 +3483,12 @@ impl VMess {
 
                 info!("Stopping VM for {}, state: {}", image_name, state_str);
 
-                let vmname_prefix = self.get_vm_prefix();
                 match vm.stats.state {
                     VirDomainState::Shutoff => {
-                        ibash_stdout!("virsh undefine --nvram {vmname_prefix}{vm.name}")?;
+                        ibash_stdout!("virsh undefine --nvram {}", self.get_vm_name(&vm.name))?;
                     }
                     _ => {
-                        virsh_destroy_forgiving(&format!("{vmname_prefix}{}", vm.name))?;
+                        virsh_destroy_forgiving(&self.get_vm_name(&vm.name))?;
                     }
                 }
             }
