@@ -721,6 +721,12 @@ pub struct GetInfo<'a> {
     vm: Option<&'a VM>,
 }
 
+impl<'a> GetInfo<'a> {
+    pub fn get_image(&self) -> &'a Image {
+        self.image
+    }
+}
+
 impl Pool {
     pub fn get_by_name<'a>(&'a self, name: &str) -> Result<GetInfo<'a>, Error> {
         // Check if name is a tag, and use the image name if it is
@@ -3179,10 +3185,12 @@ impl VMess {
             ibash_stdout!("virsh shutdown {}", self.get_vm_name(&vm.name))?;
 
             while let Err(_) = ibash_stdout!(
-                "virsh list --state-shutoff --name | grep -E '^{}$'", self.get_vm_name(&vm.name)
+                "virsh list --state-shutoff --name | grep -E '^{}$'",
+                self.get_vm_name(&vm.name)
             ) {
                 if let Err(_) = ibash_stdout!(
-                    "virsh list --name | grep -E '^{}$'", self.get_vm_name(&vm.name)
+                    "virsh list --name | grep -E '^{}$'",
+                    self.get_vm_name(&vm.name)
                 ) {
                     // Volatile VMs disappear
                     break;
