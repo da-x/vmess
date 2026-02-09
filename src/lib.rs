@@ -2441,7 +2441,7 @@ impl VMess {
             Err(e) => return Err(e),
         };
         if !to_bring_up.image.sub.is_empty() {
-            return Err(Error::HasSubImages(params.full.clone(), ""));
+            return Err(Error::HasSubImages(params.full.clone(), "spawn"));
         }
 
         // Check if image is frozen - cannot spawn frozen (read-only) images
