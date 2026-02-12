@@ -1091,18 +1091,19 @@ impl VMess {
         Ok(())
     }
 
-    pub fn get_image_prep_lock_path(&self, image: &str) -> Result<PathBuf, Error> {
+    pub fn get_image_prep_lock_path(&self, image: &str, shared: bool) -> Result<PathBuf, Error> {
         // The VM image does not need to exist. This is used for lock coordination.
-        //
-        // We will create <image>.lock in the shared pool if it is defined, otherwise
-        // we will create it in the main pool.
+        let mut lock_dir = &self.config.pool_path;
 
-        // Use the first shared pool if available, otherwise use main pool
-        let lock_dir = if let Some(shared_pool) = self.config.pools.iter().find(|p| p.shared) {
-            &shared_pool.path
-        } else {
-            &self.config.pool_path
-        };
+        if shared {
+            if let Some(shared_pool) = self.config.pools.iter().find(|p| p.shared) {
+                // We will create <image>.lock in the shared pool if it is defined and it is
+                // desired, otherwise we will create it in the main pool.
+
+                // Use the first shared pool if available, otherwise use main pool
+                lock_dir = &shared_pool.path
+            }
+        }
 
         let lock_filename = format!("{}.lock", image);
         Ok(lock_dir.join(lock_filename))
