@@ -323,6 +323,10 @@ pub struct Overrides {
 
     #[structopt(long)]
     #[serde(default, skip_serializing_if = "is_default")]
+    pub tpm: bool,
+
+    #[structopt(long)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub stop_on_reboot: bool,
 
     /// Increase main image size to this amount
@@ -2304,6 +2308,20 @@ impl VMess {
                 );
                 let elem = Element::parse(new_elem.as_bytes())?;
                 features.children.push(XMLNode::Element(elem));
+            }
+        }
+
+        if overrides.tpm {
+            if let Some(devices) = xml.get_mut_child("devices") {
+                let new_elem = format!(
+                    r#"
+<tpm model='tpm-tis'>
+  <backend type='emulator' version='2.0'/>
+</tpm>
+"#
+                );
+                let elem = Element::parse(new_elem.as_bytes())?;
+                devices.children.push(XMLNode::Element(elem));
             }
         }
 
