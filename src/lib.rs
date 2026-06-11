@@ -430,7 +430,12 @@ pub struct Move {
     /// Full name of the image to move
     pub image: String,
 
+    /// Rename in new pool and replace tag
+    #[structopt(long = "new-name")]
+    pub new_name: Option<String>,
+
     /// Name of the shared pool to move the image to
+    #[structopt(long = "pool")]
     pub pool: String,
 }
 
@@ -598,6 +603,14 @@ pub(crate) fn strip_frozen_suffix(filename: &str) -> String {
 
 pub(crate) fn strip_qcow2_suffix(filename: &str) -> String {
     PARSE_QCOW2.replace(filename, "").to_string()
+}
+
+fn replace_image_name(path: &PathBuf, new_name: &str) -> PathBuf {
+    if let Some((_, hash)) = path.to_str().unwrap().split_once("@@") {
+        PathBuf::from(format!("{new_name}@@{hash}"))
+    } else {
+        path.clone()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1824,6 +1837,14 @@ impl VMess {
         // Check that the source image exists
         let existing = pool.get_by_name(&params.image)?;
 
+        // When new_name is provided, validate no sub-images (safe to rename)
+        if params.new_name.is_some() && !existing.image.sub.is_empty() {
+            return Err(Error::FreeText(format!(
+                "Cannot rename image '{}' - it has sub-images. Only leaf images can be renamed.",
+                params.image
+            )));
+        }
+
         // Validate the target pool exists and is shared
         let target_pool = self
             .config
@@ -2001,7 +2022,14 @@ impl VMess {
         }
 
         // Move file from temporary directory to final location
-        let final_path = target_pool.path.join(&existing.image.rel_path);
+        // When new_name is provided, validate no sub-images (safe to rename)
+        let final_path = target_pool
+            .path
+            .join(if let Some(new_name) = &params.new_name {
+                replace_image_name(&existing.image.rel_path, new_name)
+            } else {
+                existing.image.rel_path.clone()
+            });
 
         // Ensure parent directory exists
         if let Some(parent) = final_path.parent() {
@@ -2018,7 +2046,7 @@ impl VMess {
 
         info!("Moved {} to {}", tmp_path.display(), final_path.display());
 
-        // Move the corresponding JSON file if it exists
+        // Determine target image stem (possibly renamed via new_name)
         let image_stem = existing
             .image
             .rel_path
@@ -2031,7 +2059,15 @@ impl VMess {
             .join(format!("{}.json", image_stem));
 
         if source_json_path.exists() {
-            let target_json_path = target_pool.path.join(format!("{}.json", image_stem));
+            let json_stem = PathBuf::from(format!("{}.json", image_stem));
+            let target_json_path =
+                target_pool
+                    .path
+                    .join(if let Some(new_name) = &params.new_name {
+                        replace_image_name(&json_stem, new_name)
+                    } else {
+                        json_stem
+                    });
 
             // Ensure parent directory exists for JSON file
             if let Some(parent) = target_json_path.parent() {
@@ -2069,8 +2105,20 @@ impl VMess {
             info!("No JSON file found for image '{}'", image_stem);
         }
 
-        // Recreate tag symlinks in target pool if they exist
-        if let Some(tag_names) = pool.rev_tags.get(&image_stem.to_string()) {
+        if let Some(new_name) = &params.new_name {
+            // Create or update tag symlink in target pool using atomic tmp+rename pattern
+            let upserted_tag_path = target_pool.path.join(format!("{}.qcow2", new_name));
+            let tag_target_filename = final_path.file_name().unwrap();
+            let tmp_tag_path =
+                target_pool
+                    .path
+                    .join(format!(".tmp.{}.{}.qcow2", process::id(), new_name));
+
+            std::os::unix::fs::symlink(tag_target_filename, &tmp_tag_path)?;
+            std::fs::rename(&tmp_tag_path, &upserted_tag_path)?;
+            info!("Upserted tag '{}' in target pool", new_name);
+        } else if let Some(tag_names) = pool.rev_tags.get(&image_stem.to_string()) {
+            // Recreate tag symlinks in target pool if they exist
             for tag_name in tag_names {
                 let new_tag_path = target_pool.path.join(format!("{}.qcow2", tag_name));
 
@@ -2143,6 +2191,7 @@ impl VMess {
     pub fn move_to(&mut self, image: &str, pool: &str) -> Result<(), Error> {
         self.move_image_or_tag(Move {
             image: image.to_string(),
+            new_name: None,
             pool: pool.to_string(),
         })
     }
@@ -3076,6 +3125,7 @@ impl VMess {
                 // Move to the shared pool
                 self.move_image_or_tag(Move {
                     image: params.name.clone(),
+                    new_name: None,
                     pool: shared_pool_name.clone(),
                 })?;
 
